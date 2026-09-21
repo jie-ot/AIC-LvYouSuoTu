@@ -1,0 +1,17 @@
+{
+  "appId": "com.lvyousuotu.app",
+  "appName": "旅有所图",
+  "webDir": "out",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}
