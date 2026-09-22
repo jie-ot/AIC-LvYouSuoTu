@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass
 
-from app.ai.schemas import PhotoAnalysisResult, ReportDraftResult
+from app.ai.schemas import PhotoAnalysisResult, ReportCopyResult, ReportDraftResult
 from app.models import dto
 from app.services import memory_service
 
@@ -15,6 +16,33 @@ TRAIT_LABELS = {
     "planning": ("随兴", "掌控"),
     "social": ("独享", "共游"),
 }
+
+
+@dataclass(frozen=True)
+class ProfileHistory:
+    """Compact, non-sensitive accumulation from previously saved reports."""
+
+    previous_report_count: int
+    motif_counts: dict[str, int]
+
+
+def build_history_snapshot(profile_payloads: list[dict | None]) -> ProfileHistory:
+    """Collect recurring scene motifs without treating them as personality facts."""
+    motifs: Counter[str] = Counter()
+    report_count = 0
+    for payload in profile_payloads:
+        if not isinstance(payload, dict):
+            continue
+        report_count += 1
+        signature = payload.get("sceneSignature") or payload.get("scene_signature")
+        tokens = signature.get("tokens") if isinstance(signature, dict) else None
+        if not isinstance(tokens, list):
+            tokens = payload.get("keywords")
+        if isinstance(tokens, list):
+            motifs.update(
+                str(token).strip() for token in set(tokens) if str(token).strip()
+            )
+    return ProfileHistory(report_count, dict(motifs))
 
 
 def _explicit_score(text: str, left_words: tuple[str, ...], right_words: tuple[str, ...]) -> int | None:
@@ -80,6 +108,7 @@ def build_profile(
     requirements: str,
     memory_json: dict | None,
     image_url_by_asset: dict[str, str] | None = None,
+    history: ProfileHistory | None = None,
 ) -> ReportDraftResult:
     useful = [p for p in analysis.photos if p.suitability != "unsuitable"]
     # A report belongs to one trip. Long-term memory must not change what this
@@ -183,16 +212,9 @@ def build_profile(
         for trait_id in ("environment", "depth", "planning", "social")
     ]
 
-    if sample_quality == "low":
-        archetype_id, archetype_name, theme = "photo_report", "旅行照片", "ocean_blue"
-    elif tags["culture"] > max(nature, city, tags["food"]):
-        archetype_id, archetype_name, theme = "culture_report", "人文与历史", "museum_gold"
-    elif nature > city:
-        archetype_id, archetype_name, theme = "nature_report", "自然风景", "forest_light"
-    elif city > 0:
-        archetype_id, archetype_name, theme = "city_report", "城市与街区", "city_neon"
-    else:
-        archetype_id, archetype_name, theme = "photo_report", "旅行照片", "ocean_blue"
+    archetype_id, archetype_name, persona_code, theme = _archetype(
+        tags=tags, nature=nature, city=city, sample_quality=sample_quality,
+    )
 
     overall_confidence = round(sum(t.confidence for t in traits) / len(traits), 2)
     scene_note = _scene_note(useful)
@@ -200,6 +222,17 @@ def build_profile(
     evidence_highlights = _evidence_highlights(useful, image_url_by_asset or {})
     next_trip_experiments = _next_trip_experiments(scene_signature, tags)
     explicit_requirements = _explicit_requirement_clauses(requirements)
+    history = history or ProfileHistory(0, {})
+    journey_count = history.previous_report_count + 1
+    returning_motifs = [
+        token for token in scene_signature.tokens
+        if history.motif_counts.get(token, 0) > 0
+    ][:3]
+    new_facets = [
+        token for token in scene_signature.tokens
+        if history.motif_counts.get(token, 0) == 0
+    ][:3]
+    profile_stage = _profile_stage(journey_count)
     unknown_names = [
         {
             "environment": "稳定场景倾向",
@@ -211,24 +244,33 @@ def build_profile(
         if not supported[key]
     ]
     boundary = "、".join(unknown_names) or "其他特质"
+    portrait = _fallback_portrait(archetype_name, scene_note, scene_signature.tokens)
+    track_update = _track_update(
+        journey_count=journey_count,
+        profile_stage=profile_stage,
+        returning_motifs=returning_motifs,
+        new_facets=new_facets,
+    )
     modules = [
-        dto.ProfileModule(title="照片内容", content=scene_note),
-        dto.ProfileModule(title="说明", content=f"这些照片没有提供足够信息判断{boundary}。"),
+        dto.ProfileModule(title="本次主调", content=portrait),
+        dto.ProfileModule(title="轨迹更新", content=track_update),
+        dto.ProfileModule(title="仍未定稿", content=f"现有内容不足以判断{boundary}。"),
     ]
     requirement_note = "；".join(_explicit_requirement_clauses(requirements)) or "未填写"
     content = "\n\n".join(
         [
-            f"照片印象｜{scene_note}",
+            f"本次旅程人格｜{archetype_name}",
+            f"本次主调｜{portrait}",
+            f"轨迹更新｜{track_update}",
             f"你填写的要求｜{requirement_note}",
-            "说明｜仅根据本次旅行的照片和你填写的要求生成。",
         ]
     )
     profile = dto.TravelProfileData(
         archetype_id=archetype_id,
         archetype_name=archetype_name,
-        persona_code="PHOTO",
-        slogan=scene_note,
-        summary=scene_note,
+        persona_code=persona_code,
+        slogan=_fallback_slogan(scene_signature.tokens),
+        summary=portrait,
         spectrums=[
             dto.ProfileSpectrum(id=key, left_label=TRAIT_LABELS[key][0], right_label=TRAIT_LABELS[key][1], value=values[key])
             for key in ("environment", "depth", "planning", "social")
@@ -237,12 +279,12 @@ def build_profile(
         modules=modules,
         strengths=[],
         watchouts=[],
-        best_scenarios=[],
+        best_scenarios=scene_signature.tokens[:3],
         action_tips=[item.reason for item in next_trip_experiments],
         next_trip_inspiration=next_trip_experiments[0].reason,
         music_recommendation=None,
         travel_prescription=None,
-        souvenir_line=None,
+        souvenir_line=_fallback_souvenir_line(scene_signature.tokens),
         visual_theme=theme,
         sample_quality=sample_quality,
         confidence=overall_confidence,
@@ -256,6 +298,10 @@ def build_profile(
         evidence_highlights=evidence_highlights,
         next_trip_experiments=next_trip_experiments,
         explicit_requirements=explicit_requirements,
+        journey_count=journey_count,
+        profile_stage=profile_stage,
+        returning_motifs=returning_motifs,
+        new_facets=new_facets,
     )
     chart_values = {
         # The radar uses only stated/confirmed wishes.  Visible scenery stays
@@ -273,7 +319,7 @@ def build_profile(
         location=(analysis.overall_location or "未知地点").strip() or "未知地点",
         start_date=analysis.start_date,
         end_date=analysis.end_date,
-        personality_summary=scene_signature.title,
+        personality_summary=archetype_name,
         content=content,
         chart_data=chart,
         profile_data=profile,
@@ -291,14 +337,160 @@ def apply_canonical_fields(draft: ReportDraftResult, analysis: PhotoAnalysisResu
     )
 
 
+def apply_creative_copy(
+    draft: ReportDraftResult,
+    copy: ReportCopyResult,
+) -> ReportDraftResult:
+    """Apply model-written editorial copy without changing any scored fields."""
+    profile = draft.profile_data
+    track_module = next(
+        (module for module in profile.modules if module.title == "轨迹更新"),
+        None,
+    )
+    boundary_module = next(
+        (module for module in profile.modules if module.title == "仍未定稿"),
+        None,
+    )
+    modules = [
+        dto.ProfileModule(title="本次主调", content=copy.portrait.strip()),
+        dto.ProfileModule(title="最值得留下的一帧", content=copy.moment_line.strip()),
+    ]
+    if track_module is not None:
+        modules.append(track_module)
+    if boundary_module is not None:
+        modules.append(boundary_module)
+
+    experiments = list(profile.next_trip_experiments)
+    if experiments:
+        experiments[0] = experiments[0].model_copy(
+            update={"title": copy.continue_title.strip()}
+        )
+    if len(experiments) > 1:
+        experiments[1] = experiments[1].model_copy(
+            update={"title": copy.contrast_title.strip()}
+        )
+
+    updated_profile = profile.model_copy(
+        update={
+            "archetype_name": copy.archetype_name.strip(),
+            "slogan": copy.slogan.strip(),
+            "summary": copy.portrait.strip(),
+            "modules": modules,
+            "souvenir_line": copy.souvenir_line.strip(),
+            "next_trip_experiments": experiments,
+        }
+    )
+    requirement_note = "；".join(profile.explicit_requirements) or "未填写"
+    track_text = track_module.content if track_module is not None else "这是一次新的旅行记录。"
+    content = "\n\n".join(
+        [
+            f"本次旅程人格｜{copy.archetype_name.strip()}",
+            f"本次主调｜{copy.portrait.strip()}",
+            f"画面留声｜{copy.souvenir_line.strip()}",
+            f"轨迹更新｜{track_text}",
+            f"你填写的要求｜{requirement_note}",
+        ]
+    )
+    return draft.model_copy(
+        update={
+            "personality_summary": copy.archetype_name.strip(),
+            "content": content,
+            "profile_data": updated_profile,
+        }
+    )
+
+
+def _archetype(
+    *, tags: Counter, nature: int, city: int, sample_quality: str,
+) -> tuple[str, str, str, str]:
+    """Choose a vivid current-trip editorial lens, never a permanent trait."""
+    if sample_quality == "low" and not any(tags.values()):
+        return "open_draft", "未定稿旅人", "OPEN · 01", "ocean_blue"
+    if tags["culture"] > max(nature, city, tags["food"]):
+        return "archive_reader", "旧城索引员", "ARCHIVE · 07", "museum_gold"
+    if tags["food"] > max(nature, city, tags["culture"]):
+        return "local_sampler", "街味采样者", "TASTE · 05", "sunset_orange"
+    if tags["coast"] >= max(1, tags["mountain"], tags["night"]):
+        return "tide_collector", "潮线收藏家", "TIDE · 03", "ocean_blue"
+    if tags["mountain"] >= max(1, tags["coast"], tags["night"]):
+        return "ridge_reader", "山脊定向者", "RIDGE · 06", "forest_light"
+    if tags["night"] >= max(1, tags["street"], tags["culture"]):
+        return "night_mapper", "夜色测绘员", "NIGHT · 08", "night_purple"
+    if nature > city:
+        return "open_land_reader", "开阔地读者", "FIELD · 02", "forest_light"
+    if city > 0:
+        return "street_editor", "街区切片师", "BLOCK · 04", "city_neon"
+    return "route_observer", "沿途观察员", "ROUTE · 00", "ocean_blue"
+
+
+def _profile_stage(journey_count: int) -> str:
+    if journey_count <= 1:
+        return "初见"
+    if journey_count <= 3:
+        return "轮廓浮现"
+    if journey_count <= 6:
+        return "风格成形"
+    return "坐标清晰"
+
+
+def _track_update(
+    *, journey_count: int, profile_stage: str,
+    returning_motifs: list[str], new_facets: list[str],
+) -> str:
+    if journey_count == 1:
+        anchors = "、".join(new_facets) or "这组画面"
+        return f"第 1 次记录，先把{anchors}收入你的旅行词典。"
+    pieces = [f"第 {journey_count} 次记录，档案进入“{profile_stage}”阶段"]
+    if returning_motifs:
+        pieces.append(f"再次出现：{'、'.join(returning_motifs)}")
+    if new_facets:
+        pieces.append(f"本次新增：{'、'.join(new_facets)}")
+    return "；".join(pieces) + "。"
+
+
+def _fallback_portrait(
+    archetype_name: str, scene_note: str, tokens: list[str],
+) -> str:
+    del archetype_name
+    anchor = "、".join(tokens[:2]) or "沿途场景"
+    scene = _complete_within(scene_note, 54).rstrip("。！？；，、：")
+    portrait = f"{scene}。这一程以{anchor}为观看坐标，记下画面里最有辨识度的层次与节奏。"
+    return _complete_within(portrait, 100)
+
+
+def _fallback_slogan(tokens: list[str]) -> str:
+    anchor = tokens[0] if tokens else "沿途场景"
+    return f"沿着{anchor}的线索，把下一站看得更具体"
+
+
+def _fallback_souvenir_line(tokens: list[str]) -> str:
+    anchor = tokens[0] if tokens else "沿途风景"
+    return f"把{anchor}留在这一程的页边"
+
+
 def _scene_note(useful: list) -> str:
     if not useful:
         return "暂无可用照片内容"
+    summaries = [photo.scene_summary.strip() for photo in useful if photo.scene_summary.strip()]
+    if summaries:
+        return _complete_within("；".join(summaries[:2]), 72).rstrip("。！？；，、：")
     facts = [fact.strip() for photo in useful for fact in photo.observed_facts if fact.strip()]
     if facts:
-        return "、".join(dict.fromkeys(facts))[:90]
-    summaries = [photo.scene_summary.strip() for photo in useful if photo.scene_summary.strip()]
-    return "；".join(summaries[:2])[:90] or "这组照片记录了旅行中的场景"
+        return _complete_within("、".join(dict.fromkeys(facts)), 72).rstrip("。！？；，、：")
+    return "这组照片记录了旅行中的场景"
+
+
+def _complete_within(text: str, limit: int) -> str:
+    """Clip generated/fallback prose at a natural boundary, never mid-word."""
+    cleaned = re.sub(r"\s+", "", text.strip())
+    if len(cleaned) <= limit:
+        return cleaned
+    candidate = cleaned[:limit]
+    for marks in ("。！？；", "，、："):
+        cut = max(candidate.rfind(mark) for mark in marks)
+        if cut >= max(12, limit // 2):
+            return candidate[:cut + 1]
+    return candidate[: limit - 1].rstrip("，、：；") + "。"
 
 
 def _explicit_requirement_clauses(requirements: str) -> list[str]:

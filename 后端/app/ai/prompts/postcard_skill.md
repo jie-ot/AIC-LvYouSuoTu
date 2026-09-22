@@ -1,5 +1,1 @@
-Create a restrained image-to-image travel postcard base.
-
-Preserve the original subject, composition, people, architecture and geographic evidence. Make only mild exposure, color and tonal adjustments. Do not add, remove or replace important objects. Do not invent landmarks, dates, locations, companions or actions.
-
-Return a clean photographic base with no readable text, title, date, postal mark, stamp, logo, frame, wide mat, poster typography or decorative overlay. The backend will add an approved title locally inside a measured safe area. Keep natural detail, realistic skin and architecture, and the original visual mood. Avoid washed-out vintage filters, excessive grain, illustration, collage and aggressive cropping.
+Transform Image 1 into a collectible contemporary travel postcard in the specified format. Preserve its people, terrain, architecture and physical logic, but art-direct boldly through a photo-specific composition, decisive cropping, layered depth, source-derived graphics, tactile printmaking or controlled color transformation. Do not invent people, landmarks, commercial brands or events. Typography and an original emblem may appear only when exact approved copy and placement are explicitly supplied; never invent additional wording, trademarks or generic branding.

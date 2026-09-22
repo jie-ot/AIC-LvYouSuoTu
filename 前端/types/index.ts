@@ -27,7 +27,20 @@ export interface Postcard {
   title: string
   imageUrl: string
   sourceAssetIds?: string[]
-  renderMode?: "ai_composite" | "local_fallback" | "local_no_text" | "legacy" | null
+  renderMode?:
+    | "ai_composite"
+    | "local_fallback"
+    | "local_no_text"
+    | "legacy"
+    | "ai_art_direction_v4"
+    | "ai_art_direction_no_text"
+    | "local_art_direction_v4"
+    | "local_art_direction_no_text"
+    | "ai_art_direction_v5"
+    | "ai_art_direction_no_text_v5"
+    | "local_art_direction_v5"
+    | "local_art_direction_no_text_v5"
+    | null
   promptVersion?: string | null
 }
 
@@ -155,6 +168,10 @@ export interface TravelProfileData {
   sceneSignature?: SceneSignature | null
   evidenceHighlights?: EvidenceHighlight[]
   nextTripExperiments?: NextTripExperiment[]
+  journeyCount?: number
+  profileStage?: string
+  returningMotifs?: string[]
+  newFacets?: string[]
 }
 
 /* ---------------- 雷达图数据点 (ReportChartPoint) ---------------- */

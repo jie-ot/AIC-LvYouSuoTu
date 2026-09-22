@@ -41,9 +41,12 @@ from app.ai.schemas import (
     PhotoAnalysisItem,
     PhotoAnalysisResult,
     PlanningIntakeResult,
+    PostcardCritiqueResult,
     PostcardPlanItem,
     PostcardPlanResult,
     PostcardSelectionResult,
+    PostcardTypeStyle,
+    ReportCopyResult,
     ReportDraftResult,
 )
 from app.ai.tools import tool_specs
@@ -52,10 +55,28 @@ from app.core.business_logging import call_in_current_context, log_event, timed_
 from app.core.config import settings
 from app.core.exceptions import AIGenerationError, ImageInputPolicyError
 from app.models.itinerary import ItineraryData
-from app.models.dto import PlanningBrief, PlanningChatMessage
+from app.models.dto import PlanningBrief, PlanningChatMessage, TravelProfileData
 from app.services.schedule_time import parse_clock_minutes, timeline_end_minutes
 
 logger = logging.getLogger("lvyousuotu")
+
+_POSTCARD_FORMAT_RATIOS = {
+    "landscape_3_2": "横版 3:2",
+    "landscape_4_3": "横版 4:3",
+    "landscape_16_9": "电影宽幅 16:9",
+    "square_1_1": "方形 1:1",
+    "portrait_4_5": "竖版 4:5",
+    "portrait_2_3": "竖版 2:3",
+}
+_POSTCARD_IMAGE_SIZES = {
+    "landscape_3_2": "1728x1152",
+    "landscape_4_3": "1536x1152",
+    "landscape_16_9": "1792x1024",
+    "square_1_1": "1408x1408",
+    "portrait_4_5": "1280x1600",
+    "portrait_2_3": "1152x1728",
+}
+_FORBIDDEN_POSTCARD_BRANDS = ("旅有所图", "travelplanet")
 
 # Planning function-calling loop bounds (defensive; tool execution is fast and
 # non-blocking, but the model must always converge to a final JSON answer).
@@ -794,6 +815,20 @@ def _parse_postcard_plan_candidates(
     except (json.JSONDecodeError, AIGenerationError) as exc:
         raise AIGenerationError("明信片创意整体 JSON 无法解析，无法定向重试") from exc
     raw_items = data.get("items") if isinstance(data, dict) else None
+    if (
+        raw_items is None
+        and expected_count == 1
+        and isinstance(data, dict)
+        and {"source_asset_ids", "image_prompt", "title"}.issubset(data)
+    ):
+        # Vision models occasionally omit the one-element wrapper while still
+        # returning a complete, schema-shaped creative item. Preserve the
+        # normal per-item validation and targeted retry instead of discarding it.
+        raw_items = [data]
+        log_event(
+            "postcard_creative_single_item_unwrapped",
+            status="accepted",
+        )
     if not isinstance(raw_items, list):
         raise AIGenerationError("明信片创意 items 不是数组，无法定向重试")
 
@@ -805,7 +840,24 @@ def _parse_postcard_plan_candidates(
             errors[index] = ["模型未返回该明信片创意"]
             continue
         try:
-            candidates.append(PostcardPlanItem.model_validate(raw_items[index]))
+            candidate = PostcardPlanItem.model_validate(raw_items[index])
+            if candidate.emblem_style != "none" and not candidate.emblem_text.strip():
+                # An emblem is optional. Dropping an empty decorative mark is
+                # safer than inventing copy or spending a full vision retry.
+                candidate = candidate.model_copy(update={"emblem_style": "none"})
+                log_event(
+                    "postcard_empty_emblem_normalized",
+                    status="accepted",
+                    item_index=index,
+                )
+            elif candidate.emblem_style == "none" and candidate.emblem_text.strip():
+                candidate = candidate.model_copy(update={"emblem_text": ""})
+                log_event(
+                    "postcard_unused_emblem_copy_removed",
+                    status="accepted",
+                    item_index=index,
+                )
+            candidates.append(candidate)
         except ValidationError as exc:
             candidates.append(None)
             errors[index] = [_summarize_validation_error(exc)]
@@ -842,6 +894,37 @@ def _collect_postcard_plan_validation_errors(
         if item_errors:
             errors.setdefault(index, []).extend(item_errors)
 
+    complete = [
+        (index, item)
+        for index, item in enumerate(candidates)
+        if item is not None
+    ]
+    if complete:
+        canonical_motif = complete[0][1].series_motif.strip()
+        for index, item in complete[1:]:
+            if item.series_motif.strip() != canonical_motif:
+                errors.setdefault(index, []).append(
+                    "series_motif 必须与本系列首张完全一致："
+                    + json.dumps(canonical_motif, ensure_ascii=False)
+                )
+    if len(complete) >= 3:
+        diversity_axes = (
+            ("canvas_format", [item.canvas_format for _, item in complete], "画幅比例"),
+            ("layout_style", [item.layout_style for _, item in complete], "空间构成"),
+            (
+                "type_style.composition",
+                [item.type_style.composition for _, item in complete],
+                "字体构图",
+            ),
+        )
+        for field_name, values, label in diversity_axes:
+            if len(set(values)) == 1:
+                retry_index = complete[-1][0]
+                errors.setdefault(retry_index, []).append(
+                    f"本批明信片的{label}不能全部相同；请为本项更换 {field_name}，"
+                    f"不要继续使用 {values[-1]}"
+                )
+
 
 def _postcard_plan_item_errors(
     item: PostcardPlanItem,
@@ -854,35 +937,66 @@ def _postcard_plan_item_errors(
             + json.dumps(expected_source_asset_ids, ensure_ascii=False)
         )
     title = item.title.strip()
-    if not 2 <= len(title) <= 12:
-        errors.append("标题长度必须为 2–12 个字")
-    if len(item.extra_texts) > 2 or any(not text.strip() for text in item.extra_texts):
-        errors.append("extra_texts 必须为 0–2 条非空文案")
+    if not 2 <= len(title) <= 10:
+        errors.append("标题长度必须为 2–10 个字")
+    if (
+        len(item.extra_texts) > 2
+        or any(not 1 <= len(text.strip()) <= 24 for text in item.extra_texts)
+        or sum(len(text.strip()) for text in item.extra_texts) > 36
+    ):
+        errors.append("extra_texts 必须为 0–2 条、单条 1–24 字且总长不超过 36 字")
+    emblem_text = item.emblem_text.strip()
+    if item.emblem_style == "none" and emblem_text:
+        errors.append("emblem_style=none 时 emblem_text 必须为空")
+    if item.emblem_style != "none" and not 1 <= len(emblem_text) <= 8:
+        errors.append("启用原创徽记时 emblem_text 必须为 1–8 个字")
     structured_fields = (
-        ("design_concept", item.design_concept, 12, 60),
-        ("photo_transformation", item.photo_transformation, 15, 100),
-        ("visual_device", item.visual_device, 10, 80),
-        ("typography", item.typography, 15, 100),
+        ("series_motif", item.series_motif, 12, 80),
+        ("design_concept", item.design_concept, 12, 160),
+        ("photo_transformation", item.photo_transformation, 20, 200),
+        ("visual_device", item.visual_device, 12, 220),
+        ("typography", item.typography, 12, 160),
     )
     for name, value, minimum, maximum in structured_fields:
         if not minimum <= len(value.strip()) <= maximum:
             errors.append(f"{name} 长度必须为 {minimum}–{maximum} 个字")
-        if _requests_rendered_text(value):
-            errors.append(f"{name} 不得要求在底图添加文字、邮戳、日期、地名或标志")
     image_prompt = item.image_prompt.strip()
-    if not 60 <= len(image_prompt) <= 180:
-        errors.append("image_prompt 长度必须为 60–180 个字")
-    if "明信片设计" not in image_prompt:
-        errors.append('image_prompt 必须包含“明信片设计”')
-    if _requests_rendered_text(image_prompt):
-        errors.append("image_prompt 不得要求在底图添加文字、邮戳、日期、地名或标志")
+    if not 140 <= len(image_prompt) <= 400:
+        errors.append("image_prompt 长度必须为 140–400 个字")
+    expected_ratio = _POSTCARD_FORMAT_RATIOS[item.canvas_format].split()[-1]
+    if expected_ratio not in image_prompt:
+        errors.append(f"image_prompt 必须明确所选 {expected_ratio} 构图")
+    if item.text_rendering == "local_exact":
+        if not re.search(
+            r"(?:无|不要|不得|禁止|避免|严禁).{0,10}(?:可读)?文字",
+            image_prompt,
+        ):
+            errors.append("local_exact 的 image_prompt 必须明确底图无可读文字")
+        if _requests_rendered_text(image_prompt):
+            errors.append("local_exact 不得要求图片模型添加文字、标题或标志")
+    approved_copy = [title, *item.extra_texts, emblem_text, image_prompt]
+    if _contains_forbidden_postcard_brand(approved_copy):
+        errors.append("标题、辅助文字、徽记及图片提示中不得出现固定产品品牌")
     return errors
+
+
+def _contains_forbidden_postcard_brand(values: list[str]) -> bool:
+    normalized = re.sub(r"[\s._\-·]+", "", " ".join(values)).casefold()
+    return any(brand in normalized for brand in _FORBIDDEN_POSTCARD_BRANDS)
 
 
 def _requests_rendered_text(value: str) -> bool:
     """Reject positive instructions that would make the image model render copy."""
     target = r"(?:可读文字|文字|标题|大字|竖字|邮戳|日期|地名|地点名|logo|LOGO|标志|水印)"
     action = r"(?:添加|加入|放置|写上|印上|叠加|生成|绘制|呈现|制作|设计|保留)"
+    # Remove negative constraints first. “不得添加文字” is exactly what the
+    # image brief should say and must not be mistaken for a positive request.
+    value = re.sub(
+        rf"(?:不|不要|不得|禁止|避免|切勿|严禁|无需|无).{{0,8}}"
+        rf"(?:{action}.{{0,8}})?{target}",
+        "",
+        value,
+    )
     return bool(
         re.search(rf"{action}.{{0,12}}{target}|{target}.{{0,12}}{action}", value)
     )
@@ -938,7 +1052,7 @@ def _retry_postcard_creative_item(
                 data_url_by_asset[asset_id] for asset_id in source_asset_ids
             ],
             temperature=0,
-            max_completion_tokens=2000,
+            max_completion_tokens=5000,
         )
         candidates, parse_errors = _parse_postcard_plan_candidates(
             raw, expected_count=1
@@ -1035,6 +1149,47 @@ def draft_report(
         return output_parser.parse_model_json(raw, ReportDraftResult)
 
 
+def draft_report_copy(
+    *,
+    analysis: PhotoAnalysisResult,
+    base_profile: TravelProfileData,
+    requirements: str,
+) -> ReportCopyResult:
+    """Write only the short editorial layer; facts and scores stay deterministic."""
+    system_prompt = load_prompt("report_system.md")
+    user_text = context_builder.build_report_copy_user_text(
+        analysis=analysis,
+        base_profile=base_profile,
+        requirements=requirements,
+    )
+    attempt_text = user_text
+    for attempt in range(2):
+        with timed_stage("orchestrator_report_copy_model", attempt=attempt + 1):
+            raw = ark_chat_client.chat_json(
+                task=ark_chat_client.TASK_REPORT_DRAFT,
+                system_prompt=system_prompt,
+                user_text=attempt_text,
+                temperature=0.65 if attempt == 0 else 0,
+                max_completion_tokens=6000,
+            )
+        try:
+            return output_parser.parse_model_json(raw, ReportCopyResult)
+        except AIGenerationError as exc:
+            if attempt == 1:
+                raise
+            log_event(
+                "report_copy_json_retry",
+                status="retry",
+                reason=type(exc).__name__,
+            )
+            attempt_text = (
+                user_text
+                + "\n\n【返回纠错】上一次输出没有通过 ReportCopyResult 字段或长度校验。"
+                "请缩短并逐项检查，只输出 JSON。"
+            )
+    raise AIGenerationError("旅行人格核心文案生成失败")
+
+
 def render_postcard_image(
     *,
     prompt: str,
@@ -1043,8 +1198,18 @@ def render_postcard_image(
     photo_transformation: str,
     visual_device: str,
     typography: str,
+    series_motif: str,
+    type_style: PostcardTypeStyle,
+    canvas_format: str,
+    layout_style: str,
+    visual_medium: str,
+    palette_strategy: str,
+    title_placement: str,
+    text_rendering: str,
     title: str,
     extra_texts: list[str],
+    emblem_style: str,
+    emblem_text: str,
 ) -> ImageGenerationResult:
     """Generate one postcard image (image-to-image)."""
     edit_instruction = prompt.strip()
@@ -1054,8 +1219,18 @@ def render_postcard_image(
         photo_transformation=photo_transformation,
         visual_device=visual_device,
         typography=typography,
+        series_motif=series_motif,
+        type_style=type_style,
+        canvas_format=canvas_format,
+        layout_style=layout_style,
+        visual_medium=visual_medium,
+        palette_strategy=palette_strategy,
+        title_placement=title_placement,
+        text_rendering=text_rendering,
         title=title,
         extra_texts=extra_texts,
+        emblem_style=emblem_style,
+        emblem_text=emblem_text,
     )
     log_event(
         "postcard_image_prompt",
@@ -1063,13 +1238,27 @@ def render_postcard_image(
         prompt_hash=hashlib.sha256(image_model_prompt.encode("utf-8")).hexdigest()[:16],
         prompt_chars=len(image_model_prompt),
         reference_image_count=len(image_data_urls),
+        canvas_format=canvas_format,
+        layout_style=layout_style,
+        title_placement=title_placement,
+        text_rendering=text_rendering,
     )
+    image_size = _POSTCARD_IMAGE_SIZES.get(canvas_format, settings.ARK_IMAGE_SIZE)
     try:
         return ark_image_client.generate_image(
-            prompt=image_model_prompt, image_data_urls=image_data_urls
+            prompt=image_model_prompt,
+            image_data_urls=image_data_urls,
+            size=image_size,
         )
     except ImageInputPolicyError:
-        sanitized_prompt = _sanitized_postcard_image_prompt()
+        sanitized_prompt = _sanitized_postcard_image_prompt(
+            canvas_format=canvas_format,
+            title=title,
+            extra_texts=extra_texts,
+            emblem_style=emblem_style,
+            emblem_text=emblem_text,
+            text_rendering=text_rendering,
+        )
         log_event(
             "postcard_image_input_policy_retry",
             status="retry",
@@ -1084,18 +1273,35 @@ def render_postcard_image(
         return ark_image_client.generate_image(
             prompt=sanitized_prompt,
             image_data_urls=image_data_urls,
+            size=image_size,
         )
 
 
-def _sanitized_postcard_image_prompt() -> str:
+def _sanitized_postcard_image_prompt(
+    *,
+    canvas_format: str,
+    title: str,
+    extra_texts: list[str],
+    emblem_style: str,
+    emblem_text: str,
+    text_rendering: str,
+) -> str:
     """Return a minimal fallback prompt for one input-policy retry."""
+    format_label = _POSTCARD_FORMAT_RATIOS.get(canvas_format, "横版 3:2")
+    text_instruction = _postcard_text_instruction(
+        text_rendering=text_rendering,
+        title=title,
+        extra_texts=extra_texts,
+        emblem_style=emblem_style,
+        emblem_text=emblem_text,
+        placement="构图选定的安全区域",
+    )
     return (
-        "Create a tasteful travel postcard edit from the provided image. "
-        "Preserve the original scene, subjects, composition, and factual content. "
-        "Apply only mild color balancing and soft natural light. "
-        "Do not add or alter people, identities, symbols, logos, flags, sensitive "
-        "content, borders, postal marks, dates, locations, or readable text. "
-        "Keep the result natural, restrained, and safe."
+        f"Create a bold contemporary {format_label} travel postcard from Image 1. "
+        "Keep its people, terrain, architecture and factual identity recognizable. "
+        "Use a decisive photo-specific crop, source-derived graphic rhythm and "
+        "refined print texture. Do not invent people, landmarks, commercial brands "
+        f"or events. {text_instruction}"
     )
 
 
@@ -1106,21 +1312,286 @@ def _compose_postcard_image_prompt(
     photo_transformation: str,
     visual_device: str,
     typography: str,
+    series_motif: str,
+    type_style: PostcardTypeStyle,
+    canvas_format: str,
+    layout_style: str,
+    visual_medium: str,
+    palette_strategy: str,
+    title_placement: str,
+    text_rendering: str,
     title: str,
     extra_texts: list[str],
+    emblem_style: str,
+    emblem_text: str,
 ) -> str:
-    """Compose a constrained no-copy base-image instruction sheet."""
-    del prompt, typography, title, extra_texts
+    """Compose the actual Seedream art-direction sheet from validated fields."""
+    prompt = _without_emblem_directives(prompt) if emblem_style == "none" else prompt
+    visual_device = (
+        _without_emblem_directives(visual_device)
+        if emblem_style == "none"
+        else visual_device
+    )
+    placement = {
+        "top_left": "左上区域",
+        "top_right": "右上区域",
+        "bottom_left": "左下区域",
+        "bottom_right": "右下区域",
+    }.get(title_placement, "左下区域")
+    route = {
+        "editorial_full_bleed": "杂志式满版摄影",
+        "paper_portal": "纸张开窗与越界景深",
+        "split_echo": "局部切片与视觉回声",
+        "tactile_collage": "照片与触感拼贴",
+        "contact_sheet": "接触印样式序列与镜头节奏",
+        "contour_cutout": "沿主体轮廓挖空与穿插",
+        "map_grid": "地图网格、路径与坐标式空间秩序",
+        "color_field": "大色域、负空间与尺度对撞",
+    }.get(layout_style, "杂志式满版摄影")
+    medium = {
+        "editorial_photo": "当代编辑摄影",
+        "cinematic_photo": "电影摄影",
+        "risograph": "Riso 孔版印刷",
+        "screenprint": "丝网印刷",
+        "gouache": "不透明水粉与照片融合",
+        "linocut": "亚麻油毡版画",
+        "mixed_media": "摄影与手工混合媒介",
+        "graphic_flat": "平面图形与摄影重组",
+    }.get(visual_medium, "当代编辑摄影")
+    palette = {
+        "source_harmony": "保留原图综合色彩关系",
+        "source_accent": "从原图提取一种高记忆度强调色",
+        "duotone": "从原图归纳双色套印",
+        "complementary": "由原图主色推导克制互补色",
+        "monochrome_pop": "单色主体配一个原图强调色",
+        "sun_faded": "日晒褪色的旅行印刷品色调",
+    }.get(palette_strategy, "保留原图综合色彩关系")
+    format_label = _POSTCARD_FORMAT_RATIOS.get(canvas_format, "横版 3:2")
+    type_direction = (
+        f"{type_style.family}/{type_style.composition}/{type_style.treatment}/"
+        f"{type_style.scale}，旋转 {type_style.rotation_degrees} 度"
+    )
+    text_instruction = _postcard_text_instruction(
+        text_rendering=text_rendering,
+        title=title,
+        extra_texts=extra_texts,
+        emblem_style=emblem_style,
+        emblem_text=emblem_text,
+        placement=placement,
+    )
     return (
         load_prompt("postcard_skill.md").strip()
-        + "\n\n【创意方案】"
-        + f"\n核心概念：{design_concept.strip()}"
-        + f"\n原图改造：{photo_transformation.strip()}"
-        + f"\n视觉记忆点：{visual_device.strip()}"
-        + "\n\n【最终硬约束】只生成无字底图；不得出现任何可读文字、标题、"
-        "大字、竖字、邮戳、日期、地名、地点名、Logo、标志或水印。"
-        "保留原图主体与事实内容，只做克制的色彩、光线和构图整理。"
+        + f"\n成图规格：{format_label}。空间构成：{route}。视觉媒介：{medium}。色彩：{palette}。"
+        + f"\n系列母题：{series_motif.strip()}。本张要延续母题，但不得复制同一版式。"
+        + f"\n核心构思：{design_concept.strip()}"
+        + f"\n照片变换：{photo_transformation.strip()}"
+        + f"\n视觉装置：{visual_device.strip()}"
+        + (
+            f"\n后端排版参考：{typography.strip()}；执行标记为 {type_direction}。"
+            "这里只用于安排主体与留白，图片模型不得绘制任何字形。"
+            if text_rendering == "local_exact"
+            else f"\n字体方向：{typography.strip()}；执行标记为 {type_direction}。"
+        )
+        + f"\n执行简报：{prompt.strip()}"
+        + f"\n文字与徽记：{text_instruction}"
+        + f"\n输出 {format_label} 单张成图；Image 1 是唯一事实来源。"
     )
+
+
+def _postcard_text_instruction(
+    *,
+    text_rendering: str,
+    title: str,
+    extra_texts: list[str],
+    emblem_style: str,
+    emblem_text: str,
+    placement: str,
+) -> str:
+    if text_rendering != "model_integrated":
+        return (
+            f"在{placement}形成自然排版通道，但底图不得出现任何可读文字、字母、"
+            "数字、Logo、徽记、水印、邮戳或日期；后端将精确排版"
+        )
+
+    approved_texts = [title.strip(), *(text.strip() for text in extra_texts)]
+    approved_texts = [text for text in approved_texts if text]
+    copy_text = json.dumps(approved_texts, ensure_ascii=False)
+    emblem_instruction = (
+        f"；加入 {emblem_style} 形式的原创小型徽记，徽记只含"
+        f" {json.dumps(emblem_text.strip(), ensure_ascii=False)}"
+        if emblem_style != "none" and emblem_text.strip()
+        else "；不加入徽记"
+    )
+    return (
+        f"在{placement}按指定字体关系融入且逐字准确呈现 {copy_text}"
+        f"{emblem_instruction}；不得增加列表之外的随机文字、固定品牌眉题、"
+        "第三方商标、日期或水印"
+    )
+
+
+def review_postcard_artwork(
+    *,
+    original_data_url: str,
+    candidate_data_url: str,
+    item: PostcardPlanItem,
+) -> PostcardCritiqueResult:
+    """Run the single bounded aesthetic review on a finished preview."""
+    system_prompt = load_prompt("postcard_critic_system.md")
+    plan_summary = {
+        "series_motif": item.series_motif,
+        "design_concept": item.design_concept,
+        "canvas_format": item.canvas_format,
+        "layout_style": item.layout_style,
+        "visual_medium": item.visual_medium,
+        "palette_strategy": item.palette_strategy,
+        "type_style": item.type_style.model_dump(),
+        "text_rendering": item.text_rendering,
+        "approved_copy": [item.title, *item.extra_texts],
+        "emblem": (
+            {"style": item.emblem_style, "text": item.emblem_text}
+            if item.emblem_style != "none"
+            else None
+        ),
+    }
+    user_text = (
+        "请评审图片2是否忠实、好看、完成度高，并严格对照以下已批准创意计划。"
+        "图片1仅用于核对原始人物、地貌、建筑与地点事实。\n"
+        + json.dumps(plan_summary, ensure_ascii=False, separators=(",", ":"))
+    )
+    with timed_stage("postcard_aesthetic_review", canvas_format=item.canvas_format):
+        raw = ark_chat_client.chat_json(
+            task=ark_chat_client.TASK_POSTCARD_CRITIC,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            image_data_urls=[original_data_url, candidate_data_url],
+            temperature=0,
+            # Agent Plan keeps reasoning enabled for vision tasks. A small
+            # budget can be consumed entirely before the strict JSON answer.
+            max_completion_tokens=5000,
+        )
+    result = output_parser.parse_model_json(raw, PostcardCritiqueResult)
+    threshold = max(1, min(10, settings.POSTCARD_AESTHETIC_MIN_SCORE))
+    scores = (
+        result.fidelity_score,
+        result.artistry_score,
+        result.composition_score,
+        result.typography_score,
+        result.finish_score,
+    )
+    passes_gate = min(scores) >= threshold and result.template_risk_score <= 4
+    if not passes_gate:
+        result.approved = False
+        if result.repair_target == "none":
+            result.repair_target = "image"
+    log_event(
+        "postcard_aesthetic_review",
+        status="approved" if result.approved else "repair",
+        canvas_format=item.canvas_format,
+        fidelity_score=result.fidelity_score,
+        artistry_score=result.artistry_score,
+        composition_score=result.composition_score,
+        typography_score=result.typography_score,
+        finish_score=result.finish_score,
+        template_risk_score=result.template_risk_score,
+        repair_target=result.repair_target,
+        typography_adjustment=result.typography_adjustment,
+    )
+    return result
+
+
+def repair_postcard_artwork(
+    *,
+    original_data_url: str,
+    candidate_base_data_url: str,
+    item: PostcardPlanItem,
+    critique: PostcardCritiqueResult,
+) -> ImageGenerationResult:
+    """Apply at most one targeted image-layer repair after visual review."""
+    placement = {
+        "top_left": "左上区域",
+        "top_right": "右上区域",
+        "bottom_left": "左下区域",
+        "bottom_right": "右下区域",
+    }.get(item.title_placement, "构图选定区域")
+    text_instruction = _postcard_text_instruction(
+        text_rendering=item.text_rendering,
+        title=item.title,
+        extra_texts=item.extra_texts,
+        emblem_style=item.emblem_style,
+        emblem_text=item.emblem_text,
+        placement=placement,
+    )
+    repair_instruction = critique.repair_instruction.strip() or "修复评审指出的主要完成度问题"
+    if item.text_rendering == "local_exact":
+        repair_instruction = _image_only_repair_instruction(repair_instruction)
+    repair_visual_device = (
+        _without_emblem_directives(item.visual_device)
+        if item.emblem_style == "none"
+        else item.visual_device
+    )
+    route = {
+        "editorial_full_bleed": "杂志式满版摄影",
+        "paper_portal": "纸张开窗与越界景深",
+        "split_echo": "局部切片与视觉回声",
+        "tactile_collage": "照片与触感拼贴",
+        "contact_sheet": "接触印样式序列",
+        "contour_cutout": "主体轮廓挖空与穿插",
+        "map_grid": "地图网格与路径秩序",
+        "color_field": "大色域与负空间对撞",
+    }.get(item.layout_style, item.layout_style)
+    prompt = (
+        load_prompt("postcard_skill.md").strip()
+        + "\n图片1是当前艺术底图，图片2是原始事实参考。只做一次局部返修，"
+        "保留现有画幅、主体身份、主要构图、系列母题和已经成立的设计，不得重做成另一张图。"
+        + f"\n评审返修要求：{repair_instruction}。"
+        + f"\n评审前分数：保真 {critique.fidelity_score}/10，艺术性 {critique.artistry_score}/10，"
+        f"构图 {critique.composition_score}/10，模板风险 {critique.template_risk_score}/10。"
+        "返修必须提高弱项，但不能用普通直出照片替换已经成立的艺术设计。"
+        + f"\n系列母题：{item.series_motif}。画幅：{_POSTCARD_FORMAT_RATIOS[item.canvas_format]}；"
+        f"空间机制：{route}；媒介：{item.visual_medium}；色彩策略：{item.palette_strategy}。"
+        + f"\n必须保留的照片变换：{item.photo_transformation}。"
+        + f"\n必须保留的视觉装置：{repair_visual_device}。"
+        + f"\n文字与徽记：{text_instruction}。"
+        "不得新增人物、地点、事件、随机文字、固定产品眉题、第三方商标或水印。"
+    )
+    log_event(
+        "postcard_aesthetic_repair",
+        status="ready",
+        canvas_format=item.canvas_format,
+        repair_target=critique.repair_target,
+        instruction_chars=len(repair_instruction),
+        prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
+    )
+    return ark_image_client.generate_image(
+        prompt=prompt,
+        image_data_urls=[candidate_base_data_url, original_data_url],
+        size=_POSTCARD_IMAGE_SIZES.get(item.canvas_format, settings.ARK_IMAGE_SIZE),
+    )
+
+
+def _without_emblem_directives(value: str) -> str:
+    clauses = re.split(r"(?<=[；;。])|\n+", value)
+    kept = [
+        clause
+        for clause in clauses
+        if not re.search(r"徽记|印章|标志|logo", clause, flags=re.IGNORECASE)
+    ]
+    return "".join(kept).strip() or "不加入任何徽记或标志"
+
+
+def _image_only_repair_instruction(value: str) -> str:
+    clauses = re.split(r"[；;。\n]+", value)
+    kept = [
+        clause.strip()
+        for clause in clauses
+        if clause.strip()
+        and not re.search(
+            r"文字|标题|字体|字号|字重|排版|文案|可读|徽记|印章|标志|logo",
+            clause,
+            flags=re.IGNORECASE,
+        )
+    ]
+    return "；".join(kept) or "只修复底图的保真、构图、材质与伪影问题，并保持底图完全无字"
 
 
 def propose_memory_update(

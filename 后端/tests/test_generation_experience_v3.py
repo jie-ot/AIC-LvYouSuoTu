@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -17,6 +18,8 @@ from app.ai.schemas import (
     PhotoAnalysisItem,
     PhotoAnalysisResult,
     PostcardPlanItem,
+    PostcardSelectionItem,
+    PostcardSelectionResult,
 )
 from app.api.endpoints.images import _read_upload_limited
 from app.core.exceptions import AIGenerationError, InternalError, InvalidParamError
@@ -166,6 +169,30 @@ class GenerationHelpersTests(unittest.TestCase):
         self.assertEqual(report.start_date, "2026-09-01")
         self.assertNotIn("朋友", report.content)
 
+    def test_profile_accumulation_marks_returning_and_new_motifs(self) -> None:
+        history = profile_engine.build_history_snapshot([
+            {"sceneSignature": {"tokens": ["滨水空间", "城市空间"]}},
+            {"scene_signature": {"tokens": ["城市空间"]}},
+        ])
+        analysis = PhotoAnalysisResult(
+            photos=[
+                _photo("a", tags=["coast", "nature"]),
+                _photo("b", tags=["coast", "nature"]),
+                _photo("c", tags=["culture"]),
+            ],
+        )
+        report = profile_engine.build_profile(
+            analysis,
+            requirements="",
+            memory_json={},
+            history=history,
+        )
+        profile = report.profile_data
+        self.assertEqual(profile.journey_count, 3)
+        self.assertEqual(profile.profile_stage, "轮廓浮现")
+        self.assertIn("滨水空间", profile.returning_motifs)
+        self.assertIn("自然场景", profile.new_facets)
+
     def test_photo_food_is_scene_evidence_not_preference(self) -> None:
         analysis = PhotoAnalysisResult(
             photos=[_photo(f"f{index}", tags=["food"]) for index in range(3)]
@@ -314,36 +341,109 @@ class GenerationHelpersTests(unittest.TestCase):
             0,
         )
 
-    def test_postcard_prompt_rejects_rendered_copy_and_appends_hard_rule(self) -> None:
+    def test_postcard_prompt_keeps_creative_brief_and_rejects_positive_copy(self) -> None:
         item = PostcardPlanItem(
-            design_concept="保留海岸原图的呼吸感和自然光线",
-            photo_transformation="只进行轻微色彩平衡并保持人物与景物不变",
+            series_motif="让海岸轮廓与浪花纹理共同形成一套流动的旅行印刷物",
+            design_concept="把海岸岩壁发展成层叠纸张开窗，让海面成为横向节奏",
+            photo_transformation="保留岩壁轮廓与真实海岸关系，重构为横版画面并加入来自海浪纹理的纸张层次",
             visual_device="在画面中央添加大字标题形成视觉记忆点",
             typography="底图不渲染文字，标题由本地排版阶段处理",
+            layout_style="paper_portal",
+            title_placement="bottom_left",
             title="海岸呼吸",
             source_asset_ids=["a"],
-            image_prompt="旅行明信片设计，保留原图场景与主体，只做克制的自然光影和色彩整理，不改变人物身份、动作或背景事实，保持真实的旅行现场感与安全留白。",
+            image_prompt=(
+                "将图片1作为唯一主体与地点事实参考，严格保留岩壁轮廓、海岸关系和真实海面。"
+                "制作横版3:2当代旅行明信片，以层叠纸张开窗重构景深，让岩壁略微越过框界，"
+                "从原图海浪提取蓝绿色纹理形成前景节奏；使用低饱和海蓝与矿物棕色板，"
+                "正午硬光整理为清晰的编辑摄影层次，左下角保留安静负空间。"
+                "不得新增人物、地标或事件，最终无可读文字、字母、数字、Logo、水印、邮戳或日期。"
+            ),
         )
         errors = orchestrator._postcard_plan_item_errors(item, ["a"])
-        self.assertTrue(any("不得要求" in error for error in errors))
+        self.assertEqual(errors, [])
         prompt = orchestrator._compose_postcard_image_prompt(
-            prompt="请添加邮戳和日期",
-            design_concept="保留海岸原图的呼吸感和自然光线",
-            photo_transformation="只进行轻微色彩平衡并保持人物与景物不变",
-            visual_device="利用原图自然光线形成视觉重心",
+            prompt=item.image_prompt,
+            series_motif=item.series_motif,
+            design_concept=item.design_concept,
+            photo_transformation=item.photo_transformation,
+            visual_device="利用原图海浪纹理形成纸张开窗的层叠视觉重心",
             typography=item.typography,
+            type_style=item.type_style,
+            canvas_format=item.canvas_format,
+            layout_style=item.layout_style,
+            visual_medium=item.visual_medium,
+            palette_strategy=item.palette_strategy,
+            title_placement=item.title_placement,
+            text_rendering=item.text_rendering,
             title=item.title,
             extra_texts=[],
+            emblem_style="none",
+            emblem_text="",
         )
-        self.assertNotIn("请添加邮戳和日期", prompt)
-        self.assertTrue(prompt.endswith("保留原图主体与事实内容，只做克制的色彩、光线和构图整理。"))
+        self.assertIn("层叠纸张开窗", prompt)
+        self.assertIn("横版 3:2", prompt)
+        normalized_prompt = prompt.casefold().replace(" ", "")
+        self.assertNotIn("旅有所图", normalized_prompt)
+        self.assertNotIn("travelplanet", normalized_prompt)
+        self.assertFalse(orchestrator._requests_rendered_text("不得添加任何可读文字"))
+        self.assertTrue(orchestrator._requests_rendered_text("在中央添加大字标题"))
+
+    def test_single_unwrapped_plan_and_empty_optional_emblem_are_normalized(self) -> None:
+        analysis = PhotoAnalysisResult(photos=[_photo("a", tags=["coast"])])
+        selection = PostcardSelectionResult(
+            items=[PostcardSelectionItem(source_asset_ids=["a"])]
+        )
+        item = generation_service._fallback_postcard_plan(analysis, selection)[0]
+        payload = item.model_dump()
+        payload.update({"emblem_style": "geometric_mark", "emblem_text": ""})
+        candidates, errors = orchestrator._parse_postcard_plan_candidates(
+            json.dumps(payload, ensure_ascii=False),
+            expected_count=1,
+        )
+        self.assertEqual(errors, {})
+        self.assertIsNotNone(candidates[0])
+        self.assertEqual(candidates[0].emblem_style, "none")
 
     def test_local_fallback_is_decodable_with_safe_ratio(self) -> None:
         source = io.BytesIO()
         Image.new("RGB", (900, 1400), "#7393a7").save(source, format="JPEG")
-        result = postcard_renderer.compose_postcard(source.getvalue(), "湖畔片刻", fallback=True)
-        self.assertIn(result.render_mode, {"local_fallback", "local_no_text"})
+        rendered_texts: list[str] = []
+        original_text = ImageDraw.ImageDraw.text
+
+        def record_text(draw, xy, text, *args, **kwargs):
+            rendered_texts.append(text)
+            return original_text(draw, xy, text, *args, **kwargs)
+
+        with patch.object(ImageDraw.ImageDraw, "text", new=record_text):
+            result = postcard_renderer.compose_postcard(source.getvalue(), "湖畔片刻", fallback=True)
+        self.assertIn(result.render_mode, {"local_art_direction_v5", "local_art_direction_no_text_v5"})
         self.assertEqual(postcard_renderer.validate_postcard_bytes(result.content), (1500, 1000))
+        self.assertEqual(rendered_texts, ["湖畔片刻"])
+
+    def test_postcard_renderer_honors_portrait_format_and_vertical_type(self) -> None:
+        source = io.BytesIO()
+        Image.new("RGB", (1400, 900), "#426d79").save(source, format="JPEG")
+        result = postcard_renderer.compose_postcard(
+            source.getvalue(),
+            "海岸呼吸",
+            fallback=True,
+            canvas_format="portrait_4_5",
+            layout_style="color_field",
+            typography_family="editorial_serif",
+            typography_composition="vertical_spine",
+            typography_treatment="duotone",
+            typography_scale="hero",
+            typography_color_role="source_accent",
+            extra_texts=["风从崖边经过"],
+            emblem_style="seal",
+            emblem_text="海风",
+        )
+        self.assertEqual(
+            postcard_renderer.validate_postcard_bytes(result.content),
+            (1080, 1350),
+        )
+        self.assertEqual(result.render_mode, "local_art_direction_v5")
 
     def test_download_url_rejects_private_network(self) -> None:
         def private(*args, **kwargs):

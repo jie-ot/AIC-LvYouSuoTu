@@ -19,8 +19,11 @@ __all__ = [
     "PhotoAnalysisResult",
     "PostcardSelectionItem",
     "PostcardSelectionResult",
+    "PostcardTypeStyle",
     "PostcardPlanItem",
     "PostcardPlanResult",
+    "PostcardCritiqueResult",
+    "ReportCopyResult",
     "ReportChartPoint",
     "ReportDraftResult",
     "MemoryUpdateResult",
@@ -68,19 +71,139 @@ class PostcardSelectionResult(BaseModel):
     items: list[PostcardSelectionItem]
 
 
+class PostcardTypeStyle(BaseModel):
+    """Executable local typography tokens chosen by the creative director."""
+
+    family: Literal[
+        "modern_sans",
+        "condensed_sans",
+        "editorial_serif",
+        "rounded_display",
+        "handwritten",
+        "stencil",
+        "monospace",
+    ] = "modern_sans"
+    composition: Literal[
+        "quiet_corner",
+        "oversized_crop",
+        "vertical_spine",
+        "split_stack",
+        "outline_echo",
+        "angled_label",
+        "center_stage",
+    ] = "quiet_corner"
+    treatment: Literal[
+        "solid",
+        "outline",
+        "offset_shadow",
+        "duotone",
+        "translucent",
+        "paper_cutout",
+    ] = "solid"
+    scale: Literal["restrained", "balanced", "bold", "hero"] = "balanced"
+    color_role: Literal[
+        "auto_contrast",
+        "source_dark",
+        "source_light",
+        "source_accent",
+        "complementary",
+    ] = "auto_contrast"
+    rotation_degrees: int = Field(default=0, ge=-12, le=12)
+
+
 class PostcardPlanItem(BaseModel):
+    series_motif: str
     design_concept: str
     photo_transformation: str
     visual_device: str
     typography: str
+    type_style: PostcardTypeStyle = Field(default_factory=PostcardTypeStyle)
+    canvas_format: Literal[
+        "landscape_3_2",
+        "landscape_4_3",
+        "landscape_16_9",
+        "square_1_1",
+        "portrait_4_5",
+        "portrait_2_3",
+    ] = "landscape_3_2"
+    layout_style: Literal[
+        "editorial_full_bleed",
+        "paper_portal",
+        "split_echo",
+        "tactile_collage",
+        "contact_sheet",
+        "contour_cutout",
+        "map_grid",
+        "color_field",
+    ] = "editorial_full_bleed"
+    visual_medium: Literal[
+        "editorial_photo",
+        "cinematic_photo",
+        "risograph",
+        "screenprint",
+        "gouache",
+        "linocut",
+        "mixed_media",
+        "graphic_flat",
+    ] = "editorial_photo"
+    palette_strategy: Literal[
+        "source_harmony",
+        "source_accent",
+        "duotone",
+        "complementary",
+        "monochrome_pop",
+        "sun_faded",
+    ] = "source_harmony"
+    title_placement: Literal[
+        "top_left", "top_right", "bottom_left", "bottom_right"
+    ] = "bottom_left"
+    text_rendering: Literal["local_exact", "model_integrated"] = "local_exact"
     title: str
     source_asset_ids: list[str]
     extra_texts: list[str] = Field(default_factory=list)
+    emblem_style: Literal[
+        "none", "monogram", "seal", "geometric_mark"
+    ] = "none"
+    emblem_text: str = ""
     image_prompt: str
 
 
 class PostcardPlanResult(BaseModel):
     items: list[PostcardPlanItem]
+
+
+class PostcardCritiqueResult(BaseModel):
+    """One bounded visual review of the finished postcard preview."""
+
+    approved: bool
+    fidelity_score: int = Field(ge=0, le=10)
+    artistry_score: int = Field(ge=0, le=10)
+    composition_score: int = Field(ge=0, le=10)
+    typography_score: int = Field(ge=0, le=10)
+    finish_score: int = Field(ge=0, le=10)
+    template_risk_score: int = Field(ge=0, le=10)
+    issues: list[str] = Field(default_factory=list, max_length=5)
+    repair_target: Literal["none", "image", "typography", "both"] = "none"
+    repair_instruction: str = Field(default="", max_length=300)
+    typography_adjustment: Literal[
+        "none",
+        "reduce_scale",
+        "increase_contrast",
+        "move_opposite_corner",
+        "simplify_treatment",
+    ] = "none"
+
+
+class ReportCopyResult(BaseModel):
+    """Small editorial copy layer applied over the deterministic report facts."""
+
+    archetype_name: str = Field(min_length=4, max_length=7)
+    slogan: str = Field(min_length=10, max_length=28)
+    portrait: str = Field(min_length=45, max_length=100)
+    moment_line: str = Field(min_length=12, max_length=34)
+    souvenir_line: str = Field(min_length=10, max_length=26)
+    continue_title: str = Field(min_length=4, max_length=9)
+    contrast_title: str = Field(min_length=4, max_length=9)
 
 
 class ReportDraftResult(BaseModel):

@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from app.ai.schemas import PhotoAnalysisResult, PostcardSelectionResult
+from app.models.dto import TravelProfileData
 from app.models.itinerary import ItineraryData
 
 
@@ -83,6 +84,52 @@ def build_report_draft_user_text(
         "【照片理解结果 PhotoAnalysisResult（上游照片理解任务的完整 JSON 输出，"
         "请据此撰写报告；勿臆造其中未出现的画面细节）】\n"
         + json.dumps(analysis.model_dump(), ensure_ascii=False)
+    )
+
+
+def build_report_copy_user_text(
+    *,
+    analysis: PhotoAnalysisResult,
+    base_profile: TravelProfileData,
+    requirements: str,
+) -> str:
+    """Give the copy editor facts plus the backend-computed profile shell."""
+    photo_facts = {
+        "photos": [
+            {
+                "asset_id": photo.asset_id,
+                "scene_summary": photo.scene_summary,
+                "observed_facts": photo.observed_facts,
+                "scene_tags": photo.scene_tags,
+            }
+            for photo in analysis.photos
+            if photo.suitability != "unsuitable"
+        ],
+        "overall_location": analysis.overall_location,
+        "start_date": analysis.start_date,
+        "end_date": analysis.end_date,
+    }
+    profile_shell = {
+        "archetype_id": base_profile.archetype_id,
+        "archetype_name": base_profile.archetype_name,
+        "persona_code": base_profile.persona_code,
+        "scene_signature": base_profile.scene_signature.model_dump(by_alias=True),
+        "sample_quality": base_profile.sample_quality,
+        "scope_note": base_profile.scope_note,
+        "journey_count": base_profile.journey_count,
+        "profile_stage": base_profile.profile_stage,
+        "returning_motifs": base_profile.returning_motifs,
+        "new_facets": base_profile.new_facets,
+        "next_trip_experiments": [
+            item.model_dump(by_alias=True) for item in base_profile.next_trip_experiments[:2]
+        ],
+    }
+    return (
+        f"【本次制作要求】\n{requirements or '未填写'}\n\n"
+        "【照片理解结果（只能使用这里已有的画面事实）】\n"
+        + json.dumps(photo_facts, ensure_ascii=False)
+        + "\n\n【后端基础档案（分数、阶段、累计次数和母题不可改写）】\n"
+        + json.dumps(profile_shell, ensure_ascii=False)
     )
 
 

@@ -62,7 +62,20 @@ class Postcard(CamelModel):
     title: str
     image_url: str
     source_asset_ids: list[str] = Field(default_factory=list)
-    render_mode: Literal["ai_composite", "local_fallback", "local_no_text", "legacy"] | None = None
+    render_mode: Literal[
+        "ai_composite",
+        "local_fallback",
+        "local_no_text",
+        "legacy",
+        "ai_art_direction_v4",
+        "ai_art_direction_no_text",
+        "local_art_direction_v4",
+        "local_art_direction_no_text",
+        "ai_art_direction_v5",
+        "ai_art_direction_no_text_v5",
+        "local_art_direction_v5",
+        "local_art_direction_no_text_v5",
+    ] | None = None
     prompt_version: str | None = None
 
 
@@ -159,6 +172,10 @@ class TravelProfileData(CamelModel):
     evidence_highlights: list[EvidenceHighlight] = Field(default_factory=list, max_length=3)
     next_trip_experiments: list[NextTripExperiment] = Field(default_factory=list, max_length=2)
     explicit_requirements: list[str] = Field(default_factory=list)
+    journey_count: int = Field(default=1, ge=1)
+    profile_stage: str = "初见"
+    returning_motifs: list[str] = Field(default_factory=list, max_length=3)
+    new_facets: list[str] = Field(default_factory=list, max_length=3)
 
 
 # —— 1.6 Report ——

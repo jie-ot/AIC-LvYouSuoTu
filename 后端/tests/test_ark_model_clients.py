@@ -38,18 +38,27 @@ class ArkModelClientsTest(TestCase):
             return client
 
         with patch.object(chat, "_get_client", side_effect=get_client), patch.object(chat, "log_event"):
-            for task in (chat.TASK_PHOTO_ANALYZE, chat.TASK_REPORT_DRAFT, chat.TASK_PLANNING, chat.TASK_PLANNING_INTAKE):
+            for task in (
+                chat.TASK_PHOTO_ANALYZE,
+                chat.TASK_POSTCARD_CRITIC,
+                chat.TASK_REPORT_DRAFT,
+                chat.TASK_PLANNING,
+                chat.TASK_PLANNING_INTAKE,
+            ):
                 chat.chat_json(task=task, system_prompt="JSON", user_text="offline")
 
-        self.assertEqual([runtime.provider for runtime in runtimes], ["ark", "ark", "deepseek", "deepseek"])
+        self.assertEqual(
+            [runtime.provider for runtime in runtimes],
+            ["ark", "ark", "ark", "deepseek", "deepseek"],
+        )
         self.assertEqual(calls[0]["model"], "doubao-seed-2.1-turbo")
         self.assertEqual(calls[0]["reasoning_effort"], "medium")
         self.assertEqual(calls[0]["extra_body"], {"thinking": {"type": "enabled"}})
         self.assertNotIn("extra_query", calls[0])
         self.assertNotIn("tools", calls[0])
         self.assertIn("max_completion_tokens", calls[0])
-        self.assertEqual(calls[2]["model"], "deepseek-v4-flash")
-        self.assertIn("max_tokens", calls[2])
+        self.assertEqual(calls[3]["model"], "deepseek-v4-flash")
+        self.assertIn("max_tokens", calls[3])
 
     def test_removed_planning_model_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):
@@ -61,7 +70,7 @@ class ArkModelClientsTest(TestCase):
         self.assertNotIn("summary-private", str(result))
         self.assertNotIn("cipher-private", str(result))
 
-    def _image_request(self, status: int, payload: dict):
+    def _image_request(self, status: int, payload: dict, *, size: str | None = None):
         requests = []
 
         def handle(request):
@@ -75,17 +84,25 @@ class ArkModelClientsTest(TestCase):
             patch.object(images.httpx, "Client", return_value=client),
             patch.object(images, "log_event"),
         ):
-            result = images.generate_image(prompt="postcard", image_data_urls=["data:image/jpeg;base64,AAAA"])
+            result = images.generate_image(
+                prompt="postcard",
+                image_data_urls=["data:image/jpeg;base64,AAAA"],
+                size=size,
+            )
         return result, requests
 
     def test_image_request_uses_paid_endpoint_key_and_flat_openai_body(self) -> None:
-        result, requests = self._image_request(200, {"data": [{"url": "https://example.com/output.jpg"}]})
+        result, requests = self._image_request(
+            200,
+            {"data": [{"url": "https://example.com/output.jpg"}]},
+            size="1280x1600",
+        )
         request = requests[0]
         body = json.loads(request.content)
         self.assertEqual(str(request.url), "https://ark.cn-beijing.volces.com/api/v3/images/generations")
         self.assertEqual(request.headers["Authorization"], "Bearer image-test-key")
         self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
-        self.assertEqual(body["size"], "2K")
+        self.assertEqual(body["size"], "1280x1600")
         self.assertEqual(body["response_format"], "url")
         self.assertNotIn("parameters", body)
         self.assertNotIn("sequential_image_generation", body)

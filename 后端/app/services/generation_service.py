@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -58,6 +59,7 @@ MAX_POSTCARD_COUNT = 5
 POSTCARD_EXCLUDED_SCENES_MESSAGE = (
     "所有可用照片都包含你明确要求避开的场景，请调整要求或更换照片"
 )
+_CREATIVE_MODEL_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -312,6 +314,12 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             source_checksum_by_asset = {
                 asset.id: str(asset.checksum) for asset in validated_assets
             }
+            profile_history = profile_engine.build_history_snapshot([
+                report.profile_data
+                for report in session.exec(
+                    select(ReportEntity).where(ReportEntity.user_id == user_id)
+                ).all()
+            ])
 
         photo_metas = [
             {
@@ -367,6 +375,7 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
                 report_future = executor.submit(call_in_current_context(
                     _draft_report_v3, analysis=analysis, requirements=request.requirements,
                     image_url_by_asset=source_path_by_asset,
+                    history=profile_history,
                     warnings=warnings, warnings_lock=warnings_lock,
                 ))
             if options.learn_preferences:
@@ -495,17 +504,20 @@ def _generate_postcards(
         ))
     selected_ids = [item.source_asset_ids[0] for item in selection.items]
     try:
-        plan = orchestrator.create_postcard_creative_plan(
-            analysis=analysis, selection=selection, selected_asset_ids=selected_ids,
-            image_data_urls=[data_url_by_asset[asset_id] for asset_id in selected_ids],
-            requirements=requirements, memory_summary="",
-        )
+        # Agent Plan currently rejects overlapping calls from one local task.
+        # Keep only the copy/planning request serialized; image rendering remains parallel.
+        with _CREATIVE_MODEL_LOCK:
+            plan = orchestrator.create_postcard_creative_plan(
+                analysis=analysis, selection=selection, selected_asset_ids=selected_ids,
+                image_data_urls=[data_url_by_asset[asset_id] for asset_id in selected_ids],
+                requirements=requirements, memory_summary="",
+            )
         plan_items = _enforce_postcard_plan(plan, selection)
     except Exception as exc:  # noqa: BLE001
         logger.warning("postcard creative fallback: %s", type(exc).__name__)
         plan_items = _fallback_postcard_plan(analysis, selection)
         warnings.append(_warning(
-            "CREATIVE_FALLBACK", "创意排版暂未完成，已使用简洁模板", "postcard", retryable=True,
+            "CREATIVE_FALLBACK", "创意规划暂未完成，已使用通用艺术指导", "postcard", retryable=True,
         ))
 
     workers = max(1, min(len(plan_items), settings.GENERATION_IMAGE_PARALLELISM))
@@ -544,7 +556,7 @@ def _enforce_postcard_plan(
     if len(plan.items) != len(selection.items):
         raise AIGenerationError("明信片创意数量不一致")
     for item, selected in zip(plan.items, selection.items, strict=True):
-        if item.source_asset_ids != selected.source_asset_ids or not 2 <= len(item.title.strip()) <= 12:
+        if item.source_asset_ids != selected.source_asset_ids or not 2 <= len(item.title.strip()) <= 10:
             raise AIGenerationError("明信片创意未严格对应后端选图")
     return list(plan.items)
 
@@ -554,16 +566,62 @@ def _fallback_postcard_plan(
 ) -> list[PostcardPlanItem]:
     by_id = {photo.asset_id: photo for photo in analysis.photos}
     items: list[PostcardPlanItem] = []
-    for selected in selection.items:
+    fallback_formats = (
+        ("landscape_4_3", "横版4:3"),
+        ("portrait_4_5", "竖版4:5"),
+        ("square_1_1", "方形1:1"),
+        ("landscape_16_9", "横版16:9"),
+    )
+    fallback_layouts = (
+        "editorial_full_bleed",
+        "contour_cutout",
+        "split_echo",
+        "tactile_collage",
+    )
+    fallback_compositions = (
+        "oversized_crop",
+        "vertical_spine",
+        "split_stack",
+        "outline_echo",
+    )
+    for index, selected in enumerate(selection.items):
         photo = by_id[selected.source_asset_ids[0]]
         title = _fallback_title(photo.scene_tags)
+        canvas_format, ratio_label = fallback_formats[index % len(fallback_formats)]
+        layout_style = fallback_layouts[index % len(fallback_layouts)]
+        type_composition = fallback_compositions[index % len(fallback_compositions)]
         items.append(PostcardPlanItem(
-            design_concept="保留原图的场景与光线，只做克制的明信片整理",
-            photo_transformation="不改变主体和事实内容，仅进行轻微色彩平衡与安全留白",
-            visual_device="以原图中已有的光线和空间层次作为视觉重心",
-            typography="由本地排版在安全区内添加小尺寸标题，无可用字体时保持无字",
-            title=title, source_asset_ids=list(selected.source_asset_ids), extra_texts=[],
-            image_prompt="明信片设计：保留原图主体、构图和地点线索，只做轻微自然调色与光线整理，不添加文字、邮戳、日期、人物或虚构地标。",
+            series_motif="让每张照片的地貌轮廓和在地色彩共同生长为一套可收藏的旅行印刷物",
+            design_concept="从原图主体方向和色彩关系出发，以大胆尺度与印刷触感形成独立而非套版的旅行明信片",
+            photo_transformation="保留可辨认主体与地点事实，以决定性裁切、原图纹理延展和局部尺度变化重组画面",
+            visual_device="用原图轮廓、颜色和局部细节建立前后景呼应，避免通用边框与固定装饰",
+            typography="标题由本地以强烈尺度对比排版，允许裁边、竖排或轮廓回声，但保持准确可读",
+            type_style={
+                "family": "condensed_sans" if index % 2 == 0 else "editorial_serif",
+                "composition": type_composition,
+                "treatment": "duotone" if index % 2 == 0 else "outline",
+                "scale": "hero",
+                "color_role": "source_accent",
+                "rotation_degrees": 0,
+            },
+            canvas_format=canvas_format,
+            layout_style=layout_style,
+            visual_medium="mixed_media",
+            palette_strategy="source_accent",
+            title_placement="bottom_left",
+            text_rendering="local_exact",
+            title=title,
+            source_asset_ids=list(selected.source_asset_ids),
+            extra_texts=[],
+            emblem_style="none",
+            emblem_text="",
+            image_prompt=(
+                "将图片1作为唯一主体与地点事实参考，保留人物身份、核心景物和可辨认地貌。"
+                f"制作{ratio_label}当代旅行明信片，以原图轮廓和色彩组织构图，主体自然形成尺度对比，"
+                "背景只用原图颜色与纹理延展，加入细腻纸纤维和克制印刷颗粒；统一真实光线，"
+                "在主体较安静一侧形成排版通道。不得新增人物、地标或事件；底图无可读文字、"
+                "字母、数字、Logo、水印、邮戳或日期。"
+            ),
         ))
     return items
 
@@ -581,13 +639,24 @@ def _render_and_store_postcard(
     warnings_lock: Lock,
 ) -> PostcardRender:
     fallback = False
+    type_composition = item.type_style.composition
+    type_treatment = item.type_style.treatment
+    type_scale = item.type_style.scale
+    type_color_role = item.type_style.color_role
+    title_placement = item.title_placement
     relative_path = storage_service.build_postcard_relative_path("jpg")
     try:
         image_result = orchestrator.render_postcard_image(
             prompt=item.image_prompt, image_data_urls=[source_data_url],
             design_concept=item.design_concept, photo_transformation=item.photo_transformation,
             visual_device=item.visual_device, typography=item.typography,
-            title="", extra_texts=[],
+            series_motif=item.series_motif,
+            type_style=item.type_style, canvas_format=item.canvas_format,
+            layout_style=item.layout_style, visual_medium=item.visual_medium,
+            palette_strategy=item.palette_strategy,
+            title_placement=item.title_placement, text_rendering=item.text_rendering,
+            title=item.title, extra_texts=item.extra_texts,
+            emblem_style=item.emblem_style, emblem_text=item.emblem_text,
         )
         if not image_result.image_url:
             raise InternalError("图片生成服务暂未返回结果")
@@ -599,12 +668,93 @@ def _render_and_store_postcard(
         source = postcard_renderer.decode_data_url(source_data_url)
         with warnings_lock:
             warnings.append(_warning(
-                "POSTCARD_LOCAL_FALLBACK", "图片处理未完成，该张已使用原图简洁模板",
+                "POSTCARD_LOCAL_FALLBACK", "云端图片生成未完成，该张已使用本地创意版式",
                 "postcard", item_index=index, retryable=True,
             ))
         logger.warning("postcard item fallback index=%d reason=%s", index, type(exc).__name__)
+
+    if not fallback and settings.POSTCARD_AESTHETIC_REVIEW_ENABLED:
+        try:
+            preview = _compose_planned_postcard(
+                source,
+                item,
+                fallback=False,
+                type_composition=type_composition,
+                type_treatment=type_treatment,
+                type_scale=type_scale,
+                type_color_role=type_color_role,
+                title_placement=title_placement,
+            )
+            with _CREATIVE_MODEL_LOCK:
+                critique = orchestrator.review_postcard_artwork(
+                    original_data_url=source_data_url,
+                    candidate_data_url=_jpeg_data_url(preview.content),
+                    item=item,
+                )
+            if not critique.approved:
+                (
+                    type_composition,
+                    type_treatment,
+                    type_scale,
+                    type_color_role,
+                    title_placement,
+                ) = _apply_typography_adjustment(
+                    critique.typography_adjustment,
+                    composition=type_composition,
+                    treatment=type_treatment,
+                    scale=type_scale,
+                    color_role=type_color_role,
+                    placement=title_placement,
+                )
+                if (
+                    settings.POSTCARD_AESTHETIC_REPAIR_ENABLED
+                    and critique.repair_target in {"image", "both"}
+                ):
+                    repair_result = orchestrator.repair_postcard_artwork(
+                        original_data_url=source_data_url,
+                        candidate_base_data_url=_jpeg_data_url(source),
+                        item=item,
+                        critique=critique,
+                    )
+                    if not repair_result.image_url:
+                        raise InternalError("图片审美返修暂未返回结果")
+                    repaired = storage_service.download_to_static(
+                        repair_result.image_url,
+                        relative_path,
+                    )
+                    with open(repaired.abs_path, "rb") as file:
+                        source = file.read()
+                    log_event(
+                        "postcard_aesthetic_repair",
+                        status="applied",
+                        item_index=index,
+                        repair_target=critique.repair_target,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            with warnings_lock:
+                warnings.append(_warning(
+                    "POSTCARD_REVIEW_SKIPPED",
+                    "该张审美复核或返修未完成，已保留首次成图",
+                    "postcard",
+                    item_index=index,
+                    retryable=True,
+                ))
+            logger.warning(
+                "postcard review skipped index=%d reason=%s",
+                index,
+                type(exc).__name__,
+            )
     try:
-        composed = postcard_renderer.compose_postcard(source, item.title, fallback=fallback)
+        composed = _compose_planned_postcard(
+            source,
+            item,
+            fallback=fallback,
+            type_composition=type_composition,
+            type_treatment=type_treatment,
+            type_scale=type_scale,
+            type_color_role=type_color_role,
+            title_placement=title_placement,
+        )
         stored = storage_service.save_bytes_to_static(composed.content, relative_path, "image/jpeg")
     except Exception:
         storage_service.delete_physical_file(relative_path)
@@ -635,19 +785,103 @@ def _render_and_store_postcard(
     )
 
 
+def _compose_planned_postcard(
+    source: bytes,
+    item: PostcardPlanItem,
+    *,
+    fallback: bool,
+    type_composition: str,
+    type_treatment: str,
+    type_scale: str,
+    type_color_role: str,
+    title_placement: str,
+) -> postcard_renderer.ComposedPostcard:
+    return postcard_renderer.compose_postcard(
+        source,
+        item.title,
+        fallback=fallback,
+        canvas_format=item.canvas_format,
+        layout_style=item.layout_style,
+        title_placement=title_placement,
+        typography_family=item.type_style.family,
+        typography_composition=type_composition,
+        typography_treatment=type_treatment,
+        typography_scale=type_scale,
+        typography_color_role=type_color_role,
+        typography_rotation=item.type_style.rotation_degrees,
+        extra_texts=item.extra_texts,
+        emblem_style=item.emblem_style,
+        emblem_text=item.emblem_text,
+        text_rendering=("local_exact" if fallback else item.text_rendering),
+    )
+
+
+def _apply_typography_adjustment(
+    adjustment: str,
+    *,
+    composition: str,
+    treatment: str,
+    scale: str,
+    color_role: str,
+    placement: str,
+) -> tuple[str, str, str, str, str]:
+    if adjustment == "reduce_scale":
+        scale = {
+            "hero": "bold",
+            "bold": "balanced",
+            "balanced": "restrained",
+            "restrained": "review_reduced",
+        }.get(scale, scale)
+    elif adjustment == "increase_contrast":
+        color_role = "auto_contrast"
+        treatment = "offset_shadow"
+    elif adjustment == "move_opposite_corner":
+        placement = {
+            "top_left": "bottom_right",
+            "top_right": "bottom_left",
+            "bottom_left": "top_right",
+            "bottom_right": "top_left",
+        }.get(placement, placement)
+    elif adjustment == "simplify_treatment":
+        treatment = "solid"
+        if composition in {"outline_echo", "angled_label"}:
+            composition = "quiet_corner"
+    return composition, treatment, scale, color_role, placement
+
+
+def _jpeg_data_url(content: bytes) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")
+
+
 def _draft_report_v3(
     *, analysis: PhotoAnalysisResult, requirements: str,
     image_url_by_asset: dict[str, str],
+    history: profile_engine.ProfileHistory,
     warnings: list[dto.GenerationWarning], warnings_lock: Lock,
 ) -> ReportDraftResult:
-    del warnings, warnings_lock
-    # The V3 report is deliberately deterministic: the model may suggest prose
-    # in future, but no unconstrained narrative is allowed to invent actions or
-    # companions from scenery.
-    return profile_engine.build_profile(
+    base = profile_engine.build_profile(
         analysis, requirements=requirements, memory_json=None,
         image_url_by_asset=image_url_by_asset,
+        history=history,
     )
+    try:
+        with _CREATIVE_MODEL_LOCK:
+            copy = orchestrator.draft_report_copy(
+                analysis=analysis,
+                base_profile=base.profile_data,
+                requirements=requirements,
+            )
+        return profile_engine.apply_creative_copy(base, copy)
+    except Exception as exc:  # noqa: BLE001
+        with warnings_lock:
+            warnings.append(_warning(
+                "REPORT_COPY_FALLBACK",
+                "人格文案已使用本地编辑版本，照片事实与累计轨迹不受影响",
+                "report",
+                retryable=True,
+            ))
+        logger.warning("report copy fallback: %s", type(exc).__name__)
+        return base
 
 
 def _representative_asset_id(analysis: PhotoAnalysisResult) -> str:
@@ -845,7 +1079,7 @@ def _persist_report_branch(
             personality_summary=report_draft.personality_summary,
             content=report_draft.content,
             chart_data=[point.model_dump() for point in report_draft.chart_data],
-            profile_version=3,
+            profile_version=4,
             profile_data=report_draft.profile_data.model_dump(by_alias=True),
         )
         session.add(report)

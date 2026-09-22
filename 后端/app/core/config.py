@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # Optional deployment-provided CJK font. If absent, renderer probes common
     # OFL Noto/Source Han installations and otherwise emits a text-free card.
     POSTCARD_FONT_PATH: str = ""
+    POSTCARD_AESTHETIC_REVIEW_ENABLED: bool = True
+    POSTCARD_AESTHETIC_REPAIR_ENABLED: bool = True
+    POSTCARD_AESTHETIC_MIN_SCORE: int = 7
     MEMORY_TOMBSTONE_SECRET: str = "lvyousuotu-demo-change-in-production"
 
     # —— 火山方舟 Agent Plan：文本 / 图片理解，密钥与按量 API 分开 ——
@@ -66,6 +69,7 @@ class Settings(BaseSettings):
     ARK_IMAGE_API_KEY: str = ""
     ARK_IMAGE_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     ARK_IMAGE_MODEL: str = "doubao-seedream-5-0-pro-260628"
+    ARK_IMAGE_FALLBACK_MODELS: str = "doubao-seedream-5-0-260128"
     ARK_IMAGE_SIZE: str = "2K"
     # 行程规划（FC + plain JSON）单独更长超时：prompt 大且开启深度思考。
     DEEPSEEK_PLANNING_TIMEOUT_SECONDS: int = 120

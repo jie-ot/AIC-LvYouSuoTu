@@ -16,6 +16,25 @@ type UnknownRecord = Record<string, unknown>
 type ReportWithAlias = Report & { profile_data?: unknown }
 
 interface ReportData {
+  identity: {
+    name: string
+    code: string
+    slogan: string
+    souvenirLine: string
+  } | null
+  evolution: {
+    journeyCount: number
+    stage: string
+    returning: string[]
+    fresh: string[]
+  } | null
+  modules: Array<{ title: string; detail: string }>
+  spectrums: Array<{
+    id: string
+    left: string
+    right: string
+    value: number
+  }>
   impression: string
   tags: string[]
   reasons: Array<{ title: string; detail: string }>
@@ -33,6 +52,33 @@ const REPORT_STYLE: ThemeStyle = {
   "--profile-line": "rgba(29,29,31,.12)", "--profile-stamp": "#0071e3",
   "--foreground": "#1d1d1f", "--muted-foreground": "#6e6e73",
   "--border": "rgba(29,29,31,.12)", "--primary": "#0071e3",
+}
+
+const PROFILE_THEMES: Record<string, Partial<ThemeStyle>> = {
+  forest_light: {
+    "--profile-accent": "#2f6b4f", "--profile-accent-2": "#87b99f",
+    "--profile-glow": "#dfeee5", "--profile-stamp": "#2f6b4f",
+  },
+  ocean_blue: {
+    "--profile-accent": "#146b8c", "--profile-accent-2": "#78bdd1",
+    "--profile-glow": "#dceff3", "--profile-stamp": "#146b8c",
+  },
+  sunset_orange: {
+    "--profile-accent": "#b94f2f", "--profile-accent-2": "#e5a06f",
+    "--profile-glow": "#f7e4d8", "--profile-stamp": "#b94f2f",
+  },
+  museum_gold: {
+    "--profile-accent": "#80622f", "--profile-accent-2": "#c5a365",
+    "--profile-glow": "#f0e8d7", "--profile-stamp": "#80622f",
+  },
+  city_neon: {
+    "--profile-accent": "#5844a6", "--profile-accent-2": "#c16ba5",
+    "--profile-glow": "#ebe4f5", "--profile-stamp": "#5844a6",
+  },
+  night_purple: {
+    "--profile-accent": "#423b83", "--profile-accent-2": "#8f7bd1",
+    "--profile-glow": "#e5e2f2", "--profile-stamp": "#423b83",
+  },
 }
 
 export function ReportDetailView() {
@@ -65,7 +111,12 @@ export function ReportDetailView() {
     )
   }
 
-  const data = buildReportData(report)
+  const profile = getProfile(report)
+  const data = buildReportData(report, profile)
+  const reportStyle = {
+    ...REPORT_STYLE,
+    ...(PROFILE_THEMES[profile?.visualTheme ?? ""] ?? {}),
+  } as ThemeStyle
   const location = displayLocation(report.location)
   const sourceImages = unique(report.sourceImages ?? [])
   const extraImages = sourceImages.filter((image) => image !== report.coverImage).slice(0, 12)
@@ -102,7 +153,7 @@ export function ReportDetailView() {
   }
 
   return (
-    <div className="persona-report persona-editorial-report flex min-h-0 flex-1 flex-col" style={REPORT_STYLE}>
+    <div className="persona-report persona-editorial-report flex min-h-0 flex-1 flex-col" style={reportStyle}>
       <button type="button" onClick={() => goBackTo(backHref)} className="ui-icon-button persona-back-button" aria-label={backLabel}>
         <ChevronLeft className="size-5" aria-hidden />
       </button>
@@ -132,10 +183,55 @@ export function ReportDetailView() {
             {report.tripId ? <Link href={`/trips/detail?tripId=${encodeURIComponent(report.tripId)}&from=report&sourceId=${encodeURIComponent(report.id)}`}>查看这次旅行</Link> : null}
           </div> : null}
           <h1>{location}</h1>
-          {data.lowSample ? <p className="persona-editorial-subtitle">照片较少，内容仅供参考。</p> : null}
+          {data.lowSample ? <p className="persona-editorial-subtitle">照片还少，这份人格先留一点空白。</p> : null}
+          {data.identity ? <div className="persona-identity-card">
+            <div className="persona-identity-orbit" aria-hidden />
+            <p>{data.evolution
+              ? "第 " + data.evolution.journeyCount + " 次记录 · " + data.evolution.stage
+              : "本次旅程人格"}</p>
+            <h2>{data.identity.name}</h2>
+            <blockquote>{data.identity.slogan}</blockquote>
+            <span>{data.identity.code}</span>
+          </div> : null}
         </header>
 
         {data.hasStructuredContent ? <main className="persona-report-content persona-editorial-content has-profile">
+          {data.modules.length || data.identity?.souvenirLine ? <ReportSection index={nextSectionIndex()} title="这次怎么看">
+            <div className="persona-copy-grid">
+              {data.modules.slice(0, 2).map((item) => <article key={item.title}>
+                <span>{item.title}</span><p>{item.detail}</p>
+              </article>)}
+              {data.identity?.souvenirLine ? <blockquote className="persona-souvenir-line">
+                “{data.identity.souvenirLine}”
+              </blockquote> : null}
+            </div>
+          </ReportSection> : null}
+
+          {data.evolution ? <ReportSection index={nextSectionIndex()} title="轨迹更新">
+            <div className="persona-evolution-card">
+              <div><strong>{String(data.evolution.journeyCount).padStart(2, "0")}</strong>
+                <p><span>档案阶段</span>{data.evolution.stage}</p></div>
+              {data.evolution.returning.length ? <p>再次出现
+                <span>{data.evolution.returning.map((item) => <b key={item}>{item}</b>)}</span>
+              </p> : null}
+              {data.evolution.fresh.length ? <p>本次新增
+                <span>{data.evolution.fresh.map((item) => <b key={item}>{item}</b>)}</span>
+              </p> : null}
+              {!data.evolution.returning.length && !data.evolution.fresh.length
+                ? <small>继续生成报告后，这里会逐渐显出反复出现与新加入的旅行母题。</small>
+                : null}
+            </div>
+          </ReportSection> : null}
+
+          {data.spectrums.length ? <ReportSection index={nextSectionIndex()} title="旅行光谱">
+            <div className="persona-spectrum-list">
+              {data.spectrums.map((item) => <div key={item.id}>
+                <p><span>{item.left}</span><span>{item.right}</span></p>
+                <i><b style={{ width: String(Math.max(4, Math.min(96, item.value))) + "%" }} /></i>
+              </div>)}
+            </div>
+          </ReportSection> : null}
+
           {extraImages.length ? <ReportSection index={nextSectionIndex()} title="旅行照片">
             <ReportPhotoGrid images={extraImages} />
           </ReportSection> : null}
@@ -229,11 +325,14 @@ function ReportPhotoGrid({ images }: { images: string[] }) {
   </div>
 }
 
-function buildReportData(report: Report): ReportData {
-  const profile = getProfile(report)
+function buildReportData(report: Report, profile: TravelProfileData | null): ReportData {
   const isV3 = (report.profileVersion ?? 0) >= 3
   if (!isV3) {
     return {
+      identity: null,
+      evolution: null,
+      modules: [],
+      spectrums: [],
       impression: "",
       tags: [],
       reasons: [],
@@ -244,21 +343,54 @@ function buildReportData(report: Report): ReportData {
     }
   }
 
+  const identityName = polishedText(profile?.archetypeName, 20)
+  const identity = identityName ? {
+    name: identityName,
+    code: plainText(profile?.personaCode, 24),
+    slogan: polishedText(profile?.slogan, 60),
+    souvenirLine: polishedText(profile?.souvenirLine, 60),
+  } : null
+  const journeyCount = Math.max(1, Number(profile?.journeyCount ?? 1))
+  const evolution = profile ? {
+    journeyCount,
+    stage: polishedText(profile.profileStage, 16) || (journeyCount > 1 ? "轮廓浮现" : "初见"),
+    returning: unique((profile.returningMotifs ?? []).map((item) => polishedText(item, 18))).slice(0, 3),
+    fresh: unique((profile.newFacets ?? []).map((item) => polishedText(item, 18))).slice(0, 3),
+  } : null
+  const modules = (profile?.modules ?? [])
+    .filter((item) => item.title !== "轨迹更新" && item.title !== "仍未定稿")
+    .map((item) => ({
+      title: polishedText(item.title, 24),
+      detail: polishedText(item.content, 180),
+    }))
+    .filter((item) => item.title && item.detail)
+  const supportedTraits = new Set((profile?.traits ?? [])
+    .filter((item) => item.assessment === "supported")
+    .map((item) => item.id))
+  const spectrums = (profile?.spectrums ?? [])
+    .filter((item) => supportedTraits.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      left: polishedText(item.leftLabel, 12),
+      right: polishedText(item.rightLabel, 12),
+      value: Number(item.value),
+    }))
   const highlights = profile?.evidenceHighlights ?? []
-  const impression = [profile?.sceneSignature?.description, profile?.summary]
-    .map((item) => concreteText(item, 220)).find(Boolean) ?? ""
+  const impression = polishedText(profile?.sceneSignature?.description, 220)
   const tags = unique((profile?.sceneSignature?.tokens ?? profile?.keywords ?? [])
-    .map((item) => concreteText(item, 20))).slice(0, 4)
-  const reasons = unique(highlights.map((item) => concreteText(item.observedFact, 80)))
+    .map((item) => polishedText(item, 20))).slice(0, 4)
+  const reasons = unique(highlights.map((item) => polishedText(item.observedFact, 80)))
     .slice(0, 6).map((title) => ({ title, detail: "" }))
   const requirements = unique((profile?.explicitRequirements ?? []).map((item) => plainText(item, 120)))
   const suggestions = (profile?.nextTripExperiments ?? []).slice(0, 3).map((item) => ({
-    title: concreteText(item.title, 54) || "行程建议",
-    detail: concreteText(item.reason, 150),
+    title: polishedText(item.title, 54) || "行程建议",
+    detail: polishedText(item.reason, 150),
     prompt: plainText(item.planningPrompt, 300),
   })).filter((item) => item.detail || item.prompt)
-  const hasStructuredContent = Boolean(impression || tags.length || reasons.length || requirements.length || suggestions.length)
+  const hasStructuredContent = Boolean(identity || evolution || modules.length || spectrums.length
+    || impression || tags.length || reasons.length || requirements.length || suggestions.length)
   return {
+    identity, evolution, modules, spectrums,
     impression, tags, reasons, requirements, suggestions,
     lowSample: profile?.sampleQuality === "low",
     hasStructuredContent,
@@ -276,11 +408,9 @@ function plainText(value: unknown, limit = 180) {
   return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned
 }
 
-function concreteText(value: unknown, limit = 180) {
+function polishedText(value: unknown, limit = 180) {
   const text = plainText(value, limit)
-  return /人格|画像|性格|取景签名|旅行偏好|偏好报告|旅行处方|置信度|待验证|证据|光影|温度|松弛|氛围|诗意|治愈|小确幸|浪漫|专属|灵动|美好|审美|质感|偏好/.test(text)
-    ? ""
-    : text
+  return /^(?:旅行照片|照片内容|美好旅程|旅行故事|精彩瞬间|暂无)$/u.test(text) ? "" : text
 }
 
 function unique(items: string[]) { return [...new Set(items.filter(Boolean))] }
@@ -300,6 +430,26 @@ function camelize(value: unknown): unknown {
 async function renderReportImage(report: Report, data: ReportData): Promise<Blob> {
   const contentSections: Array<[string, string]> = []
   if (data.hasStructuredContent) {
+    if (data.identity) {
+      contentSections.push(["本次旅程人格", [
+        data.identity.name,
+        data.identity.slogan,
+        data.identity.souvenirLine ? "“" + data.identity.souvenirLine + "”" : "",
+      ].filter(Boolean).join("\n")])
+    }
+    if (data.modules.length) {
+      contentSections.push(["这次怎么看", data.modules.slice(0, 2)
+        .map((item) => item.title + "：" + item.detail).join("\n")])
+    }
+    if (data.evolution) {
+      const motifs = [
+        data.evolution.returning.length ? "再次出现：" + data.evolution.returning.join("、") : "",
+        data.evolution.fresh.length ? "本次新增：" + data.evolution.fresh.join("、") : "",
+      ].filter(Boolean).join("\n")
+      contentSections.push(["轨迹更新",
+        "第 " + data.evolution.journeyCount + " 次记录 · " + data.evolution.stage
+        + (motifs ? "\n" + motifs : "")])
+    }
     const photoContent = [data.impression, data.tags.join("、")].filter(Boolean).join("\n")
     if (photoContent) contentSections.push(["照片内容", photoContent])
     if (data.reasons.length) {
@@ -339,7 +489,7 @@ async function renderReportImage(report: Report, data: ReportData): Promise<Blob
   context.fillStyle = "#1d1d1f"; context.font = "700 62px sans-serif"; context.fillText(displayLocation(report.location), 84, headerY + 86)
   context.fillStyle = "#6e6e73"; context.font = "26px sans-serif"; context.fillText(report.dateLabel, 84, headerY + 134)
   const contentY = headerY + 188
-  let y = data.lowSample ? drawWrapped(context, "照片较少，内容仅供参考。", 84, contentY, 912, 36, "#6e6e73") + 36 : contentY
+  let y = data.lowSample ? drawWrapped(context, "照片还少，这份人格先留一点空白。", 84, contentY, 912, 36, "#6e6e73") + 36 : contentY
   for (const [title, body] of sections) {
     context.fillStyle = "#0071e3"; context.font = "600 25px sans-serif"; context.fillText(title, 84, y); y += 48
     y = drawWrapped(context, body, 84, y, 912, 38, "#1d1d1f") + 56

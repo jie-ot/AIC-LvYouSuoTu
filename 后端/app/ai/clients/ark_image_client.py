@@ -28,14 +28,22 @@ class ImageGenerationResult:
     ext: str = "jpg"
 
 
-def generate_image(*, prompt: str, image_data_urls: list[str]) -> ImageGenerationResult:
+def generate_image(
+    *, prompt: str, image_data_urls: list[str], size: str | None = None
+) -> ImageGenerationResult:
     """Generate one postcard image (image-to-image). Returns a transport result."""
     if not settings.ARK_IMAGE_API_KEY:
         raise InternalError("图片模型服务未配置 ARK_IMAGE_API_KEY（普通按量 API Key）")
-    return _real_generate_image(prompt=prompt, image_data_urls=image_data_urls)
+    return _real_generate_image(
+        prompt=prompt,
+        image_data_urls=image_data_urls,
+        size=size or settings.ARK_IMAGE_SIZE,
+    )
 
 
-def _real_generate_image(*, prompt: str, image_data_urls: list[str]) -> ImageGenerationResult:
+def _real_generate_image(
+    *, prompt: str, image_data_urls: list[str], size: str
+) -> ImageGenerationResult:
     """POST the OpenAI-compatible JSON body and return the first image URL."""
     if not image_data_urls:
         raise AIGenerationError("AI 生成失败：图生图缺少参考图")
@@ -45,13 +53,20 @@ def _real_generate_image(*, prompt: str, image_data_urls: list[str]) -> ImageGen
     # A HTTP-200 response without a usable image is a transient gateway result
     # in practice. Always allow one retry for that case even when the generic
     # retry setting is disabled.
-    attempts = max(2, settings.MODEL_MAX_RETRY + 1)
+    fallback_models = [
+        item.strip()
+        for item in getattr(settings, "ARK_IMAGE_FALLBACK_MODELS", "").split(",")
+        if item.strip()
+    ]
+    model_candidates = list(dict.fromkeys([settings.ARK_IMAGE_MODEL, *fallback_models]))
+    model_index = 0
+    attempts = max(2, settings.MODEL_MAX_RETRY + 1) + len(model_candidates) - 1
     last_transient: Exception | None = None
     body = {
-        "model": settings.ARK_IMAGE_MODEL,
+        "model": model_candidates[model_index],
         "prompt": prompt,
         "image": image_data_urls if len(image_data_urls) > 1 else image_data_urls[0],
-        "size": settings.ARK_IMAGE_SIZE,
+        "size": size,
         "response_format": "url",
         "output_format": "jpeg",
         "watermark": False,
@@ -158,8 +173,33 @@ def _real_generate_image(*, prompt: str, image_data_urls: list[str]) -> ImageGen
             )
             raise ImageInputPolicyError("图片模型输入内容审核未通过")
 
+        if _is_model_not_open(payload) and model_index + 1 < len(model_candidates):
+            previous_model = model_candidates[model_index]
+            model_index += 1
+            body["model"] = model_candidates[model_index]
+            logger.warning(
+                "ark image model not open; trying configured fallback (%s -> %s)",
+                previous_model,
+                body["model"],
+            )
+            log_event(
+                "ark_image_model_fallback",
+                status="retry",
+                request_id=request_id,
+                reason="model_not_open",
+                previous_model=previous_model,
+                fallback_model=body["model"],
+            )
+            continue
+
         if resp.status_code != 200:
-            logger.warning("ark image bad request (request_id=%s status=%d)", request_id, resp.status_code)
+            response_summary = _summarize_response(payload, resp)
+            logger.warning(
+                "ark image bad request (request_id=%s status=%d summary=%s)",
+                request_id,
+                resp.status_code,
+                response_summary,
+            )
             log_event(
                 "ark_image",
                 status="failed",
@@ -167,6 +207,7 @@ def _real_generate_image(*, prompt: str, image_data_urls: list[str]) -> ImageGen
                 attempt=attempt + 1,
                 reason="bad_status",
                 http_status=resp.status_code,
+                response_summary=response_summary,
             )
             raise AIGenerationError("AI 生成失败：图片模型返回错误")
 
@@ -286,6 +327,13 @@ def _is_input_policy_violation(payload: object) -> bool:
             "InputTextSensitiveContentDetected", "InputImageSensitiveContentDetected",
             "SensitiveContentDetected",
         }
+        for error in _provider_errors(payload)
+    )
+
+
+def _is_model_not_open(payload: object) -> bool:
+    return any(
+        str(error.get("code", "")).split(".")[0] == "ModelNotOpen"
         for error in _provider_errors(payload)
     )
 

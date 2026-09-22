@@ -208,8 +208,9 @@ class TripAndMemoryV3Tests(unittest.TestCase):
             report.profile_data.scope_note,
             *(item.reason for item in report.profile_data.next_trip_experiments),
         ])
-        for unwanted in ("人格", "画像", "取景签名", "置信度", "待验证", "喜欢光影"):
+        for unwanted in ("画像", "取景签名", "置信度", "待验证", "喜欢光影"):
             self.assertNotIn(unwanted, visible_text)
+        self.assertIn("本次旅程人格", visible_text)
         self.assertIn("湖边步道", visible_text)
 
     def test_saved_memory_is_not_injected_into_photo_creation(self) -> None:
