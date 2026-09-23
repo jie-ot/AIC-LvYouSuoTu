@@ -19,6 +19,7 @@ from app.models.plan import Plan
 from app.models.postcard_group import PostcardGroup
 from app.models.report import Report
 from app.models.trip import Trip
+from app.services import trip_service
 
 
 TRAVEL_TYPE_LABELS = {
@@ -97,6 +98,10 @@ def _clean(value: object) -> str:
 def _parse_date(value: str | None) -> date | None:
     if not value:
         return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
 
 
 def _date_label_end(value: str | None) -> date | None:
@@ -122,10 +127,6 @@ def _safe_float(value: object) -> float:
         return max(0.0, float(value or 0))
     except (TypeError, ValueError):
         return 0.0
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
 
 
 def _trip_state(trip: Trip, photo_count: int) -> tuple[str, str]:
@@ -252,6 +253,34 @@ def _photo_assets_by_trip(
     return assets
 
 
+def scene_source_photos(
+    observations: dict[str, Any], photo_trip_ids: set[str], pattern_key: str,
+) -> list[dto.TravelMemoryPhotoEvidence]:
+    """Expose only photo assets tagged with this specific observed scene."""
+    rows: list[dto.TravelMemoryPhotoEvidence] = []
+    seen: set[tuple[str, str]] = set()
+    for trip_id in sorted(photo_trip_ids):
+        snapshot = observations.get(trip_id)
+        scene_evidence = snapshot.get("scene_evidence") if isinstance(snapshot, dict) else None
+        if not isinstance(scene_evidence, dict):
+            continue
+        for tag, evidence_list in scene_evidence.items():
+            if SCENE_TO_TYPE.get(str(tag)) != pattern_key or not isinstance(evidence_list, list):
+                continue
+            for evidence in evidence_list:
+                if not isinstance(evidence, dict):
+                    continue
+                asset_id = str(evidence.get("asset_id") or "")
+                image_url = str(evidence.get("image_url") or "")
+                pair = (trip_id, asset_id)
+                if asset_id and image_url.startswith("/static/uploads/") and pair not in seen:
+                    seen.add(pair)
+                    rows.append(dto.TravelMemoryPhotoEvidence(
+                        trip_id=trip_id, asset_id=asset_id, image_url=image_url,
+                    ))
+    return rows[:12]
+
+
 def build_context(
     session: Session,
     user_id: str,
@@ -295,7 +324,8 @@ def build_context(
         same_day_span = _safe_float(observation.get("longest_same_day_span_hours"))
         if same_day_span >= 7:
             photo_full_day_trip_ids.append(trip.id)
-        text = " ".join(filter(None, (_clean(trip.location), _clean(trip.title), plan_text)))
+        display_title = trip_service.default_title(trip.location, trip.date_label) if trip_service.is_placeholder_title(trip.title) else trip.title
+        text = " ".join(filter(None, (_clean(trip.location), _clean(display_title), plan_text)))
         type_labels = _travel_types(text, scene_tags)
         scores = _type_scores(plan_text, set())
         for key, score in scores.items():
@@ -327,7 +357,7 @@ def build_context(
         footprints.append(dto.TravelMemoryFootprint(
             id=f"footprint_{trip.id}",
             trip_id=trip.id,
-            title=trip.title,
+            title=display_title,
             location=trip.location,
             date_label=trip.date_label,
             cover_image=trip.cover_image,
@@ -339,6 +369,7 @@ def build_context(
             pace_label=pace_label,
             photo_count=photo_count,
             plan_count=len(trip_plans),
+            has_photo_observation=trip.id in observations,
         ))
 
     confirmed_ids = {
@@ -376,8 +407,12 @@ def build_context(
             source_kind=source_kind,
             support_count=len(support_ids),
             source_trip_ids=sorted(support_ids),
+            photo_source_trip_ids=sorted(photo_ids),
+            source_photos=scene_source_photos(observations, photo_ids, key),
             source_labels=source_labels,
-            confirmable=len(support_ids) >= 2,
+            # Even one photo trip can support a suggestion for the user to
+            # affirm. It remains absent from planning until they confirm it.
+            confirmable=bool(photo_ids) or len(support_ids) >= 2,
             confirmed=pattern_id in confirmed_ids,
             planning_text=TRAVEL_TYPE_PLANNING_TEXT[key],
         ))
@@ -397,6 +432,7 @@ def build_context(
             source_kind="plans",
             support_count=len(plan_pace_rows),
             source_trip_ids=[trip_id for trip_id, _days, _count in plan_pace_rows],
+            photo_source_trip_ids=[],
             source_labels=[f"{len(plan_pace_rows)} 次旅行的规划"],
             confirmable=True,
             confirmed=pattern_id in confirmed_ids,
@@ -413,6 +449,7 @@ def build_context(
             source_kind="photos",
             support_count=len(photo_full_day_trip_ids),
             source_trip_ids=photo_full_day_trip_ids,
+            photo_source_trip_ids=photo_full_day_trip_ids,
             source_labels=[f"{len(photo_full_day_trip_ids)} 次照片记录"],
             confirmable=True,
             confirmed=pattern_id in confirmed_ids,

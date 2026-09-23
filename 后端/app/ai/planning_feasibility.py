@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from app.models.itinerary import ItineraryData, Schedule
 
@@ -38,16 +38,18 @@ class Problem:
     blocking: bool = True
     date: str | None = None
     schedule_id: str | None = None
+    resolution: Literal["model_repair", "defer", "advisory"] = "model_repair"
 
 
 FLIGHT_TOOLS = frozenset(
     {
+        "searchFlightsByDepArr",
+        "getFlightTransferInfo",
         "searchFlightItineraries",
-        "searchFlightsTransferinfo",
-        "searchFlightandTrainTransferinfo",
+        "getFlightAndTrainTransferInfo",
     }
 )
-RAIL_TOOL = "query_rail_tickets"
+RAIL_TOOL = "searchTrainTickets"
 ROUTE_TOOL = "amap_route"
 
 MIN_SCHEDULES_PER_DAY = 3
@@ -72,6 +74,12 @@ _CLOCK_PATTERN = re.compile(r"^(?:[01]?\d|2[0-3]):[0-5]\d$")
 # 「G7 京新高速」「X12 县道」 are shaped exactly like 「G7 次列车」, so the road has to
 # be told apart by what follows it rather than by the code itself.
 _ROAD_SUFFIX_PATTERN = re.compile(r"\s*(?:高速|国道|省道|县道|公路|出口|匝道|收费站)")
+_CLOCK_IN_TEXT = re.compile(r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)")
+_PRE_DEPARTURE_MARKERS = ("退房", "车站", "机场", "取票", "安检", "候车", "检票", "行李", "赴站", "前往站")
+_DEFERRED_CLOCK_NOTE = "具体钟点待班次核实"
+_REAL_TRAVEL_ACTION = re.compile(r"乘|搭|坐|乘机|飞往|起飞")
+_INTERCITY_MOVEMENT = re.compile(r"前往|抵达|到达|返回|去往|从.{1,24}(?:到|至)|由.{1,24}(?:到|至)")
+_SCENIC_VEHICLE_MARKERS = ("博物馆", "模型", "展陈", "观光小火车", "景区小火车", "园区小火车")
 
 # Tolerances: AMap route numbers are exact, so only rounding/leg-splitting slack
 # is allowed before a value counts as invented.
@@ -100,6 +108,32 @@ def _schedule_text(schedule: Schedule) -> str:
         for part in (schedule.activity, schedule.transport)
         if part
     )
+
+
+def lodging_consistency_problems(data: ItineraryData) -> list[Problem]:
+    """Catch a same-day checkout followed by a claimed continuation of the stay.
+
+    This is a narrow language check, not a full hotel-booking parser. It catches
+    the observed failure without guessing whether a traveller should check out
+    on a different date or which property they booked.
+    """
+    problems: list[Problem] = []
+    for day in data.itinerary:
+        checkout_seen = False
+        for schedule in day.schedules:
+            activity = schedule.activity
+            if checkout_seen and "续住" in activity:
+                problems.append(Problem(
+                    message=(
+                        f"{day.date} 同一天先写退房、后写续住，住宿动作前后矛盾；"
+                        "请核对预订日期与酒店，删除多余退房或明确重新入住。"
+                    ),
+                    date=day.date,
+                ))
+                break
+            if "退房" in activity:
+                checkout_seen = True
+    return problems
 
 
 def _tool_of(fact: dict[str, Any]) -> str:
@@ -157,6 +191,98 @@ def _is_transport_leg(
     if any(code in upper for code in cited_codes):
         return True
     return len(transport_facts) == len(referenced)
+
+
+def _is_clock_dependent_intercity_leg(
+    schedule: Schedule,
+    referenced: list[dict[str, Any]],
+    transport_facts: list[dict[str, Any]],
+) -> bool:
+    """Conservative gate trigger: a vehicle mention alone is not a trip."""
+    if not _is_transport_leg(schedule, referenced, transport_facts):
+        return False
+    if transport_facts:
+        return True
+    text = _schedule_text(schedule)
+    return bool(
+        not any(marker in text for marker in _SCENIC_VEHICLE_MARKERS)
+        and _REAL_TRAVEL_ACTION.search(text)
+        and _INTERCITY_MOVEMENT.search(text)
+    )
+
+
+def defer_unanchored_intercity_times(
+    data: ItineraryData,
+    retained_facts: dict[str, dict[str, Any]],
+) -> tuple[ItineraryData, list[str]]:
+    """Remove clock precision that depends on an unverified intercity service.
+
+    A verified POI or city route proves the place or travel duration, not that
+    the traveller can reach it at 10:25 after a train with no known arrival.
+    Preserve those citations and durations while flagging the affected rows.
+    """
+    facts = _usable_facts(retained_facts)
+    result = data.model_copy(deep=True)
+    affected_dates: list[str] = []
+    for day in result.itinerary:
+        anchors: list[bool] = []
+        intercity: list[bool] = []
+        for schedule in day.schedules:
+            referenced = [facts[ref] for ref in schedule.fact_refs if ref in facts]
+            transport_facts = [
+                fact for fact in referenced
+                if _tool_of(fact) in FLIGHT_TOOLS or _tool_of(fact) == RAIL_TOOL
+            ]
+            is_leg = _is_clock_dependent_intercity_leg(schedule, referenced, transport_facts)
+            intercity.append(is_leg)
+            start = _normalize_clock(schedule.start_time)
+            end = _normalize_clock(schedule.end_time)
+            anchors.append(bool(
+                is_leg and schedule.fact_status != "unverified" and start and end
+                and any(
+                    _fact_time(fact, "depart_datetime", "depart_time") == start
+                    and _fact_time(fact, "arrive_datetime", "arrive_time") == end
+                    for fact in transport_facts
+                )
+            ))
+
+        unknown_legs = [index for index, is_leg in enumerate(intercity) if is_leg and not anchors[index]]
+        if not unknown_legs:
+            continue
+        for index in unknown_legs:
+            _defer_clock(day.schedules[index], "班次待确认")
+            for before in range(index - 1, -1, -1):
+                candidate = day.schedules[before]
+                if intercity[before] or not any(
+                    marker in " ".join(filter(None, (candidate.activity, candidate.transport, candidate.place_name)))
+                    for marker in _PRE_DEPARTURE_MARKERS
+                ):
+                    break
+                _defer_clock(candidate, "班次确定后安排")
+            for after in range(index + 1, len(day.schedules)):
+                if anchors[after]:
+                    break
+                _defer_clock(day.schedules[after], "抵达后顺延")
+        advisory = (
+            f"{day.date} 跨城班次时刻尚未核实；站前准备和抵达后的活动须按实际班次顺延。"
+            "已引用的地点与市内路线仅支持位置和路程，不保证这些活动的执行钟点。"
+        )
+        if advisory not in result.advisories:
+            result.advisories.append(advisory)
+        affected_dates.append(day.date)
+    return result, affected_dates
+
+
+def _defer_clock(schedule: Schedule, period: str) -> None:
+    schedule.start_time = None
+    schedule.end_time = None
+    schedule.time_period = period
+    schedule.fact_status = "unverified"
+    schedule.activity = _CLOCK_IN_TEXT.sub("待确认", schedule.activity)
+    if schedule.transport:
+        schedule.transport = _CLOCK_IN_TEXT.sub("待确认", schedule.transport)
+    if _DEFERRED_CLOCK_NOTE not in schedule.activity:
+        schedule.activity = f"{schedule.activity.rstrip()}（{_DEFERRED_CLOCK_NOTE}）"
 
 
 def _within(actual: float, expected: float, ratio: float, floor: float) -> bool:
@@ -442,8 +568,7 @@ def find_problem_details(
         problems.extend(_day_problems(day.date, day.schedules))
         for schedule in day.schedules:
             problems.extend(
-                Problem(message=message, date=day.date, schedule_id=schedule.id)
-                for message in _schedule_problems(
+                _schedule_problems(
                     date=day.date,
                     schedule=schedule,
                     facts=facts,
@@ -515,6 +640,7 @@ def _day_problems(date: str, schedules: list[Schedule]) -> list[Problem]:
                 ),
                 blocking=False,
                 date=date,
+                resolution="advisory",
             )
         ]
     if len(schedules) > MAX_SCHEDULES_PER_DAY:
@@ -526,6 +652,7 @@ def _day_problems(date: str, schedules: list[Schedule]) -> list[Problem]:
                 ),
                 blocking=False,
                 date=date,
+                resolution="advisory",
             )
         ]
     return []
@@ -537,16 +664,20 @@ def _schedule_problems(
     schedule: Schedule,
     facts: dict[str, dict[str, Any]],
     transport_code_pool: set[str],
-) -> list[str]:
-    problems: list[str] = []
+) -> list[Problem]:
+    problems: list[Problem] = []
     label = f"{date} {schedule.id}"
     referenced = [facts[ref] for ref in schedule.fact_refs if ref in facts]
     missing_refs = [ref for ref in schedule.fact_refs if ref not in facts]
     if missing_refs:
-        problems.append(
-            f"{label} 引用了不存在的 fact_id：{'、'.join(missing_refs[:3])}；"
-            "只能引用保留事实中的 ID"
-        )
+        problems.append(Problem(
+            message=(
+                f"{label} 引用了不存在的 fact_id：{'、'.join(missing_refs[:3])}；"
+                "只能引用保留事实中的 ID"
+            ),
+            date=date,
+            schedule_id=schedule.id,
+        ))
     transport_facts = [
         fact
         for fact in referenced
@@ -554,10 +685,14 @@ def _schedule_problems(
     ]
     route_facts = [fact for fact in referenced if _tool_of(fact) == ROUTE_TOOL]
 
-    problems.extend(_clock_problems(label=label, schedule=schedule))
+    problems.extend(
+        Problem(message=message, date=date, schedule_id=schedule.id)
+        for message in _clock_problems(label=label, schedule=schedule)
+    )
     problems.extend(
         _intercity_problems(
             label=label,
+            date=date,
             schedule=schedule,
             referenced=referenced,
             transport_facts=transport_facts,
@@ -565,10 +700,9 @@ def _schedule_problems(
         )
     )
     problems.extend(
-        _route_evidence_problems(
-            label=label,
-            schedule=schedule,
-            route_facts=route_facts,
+        Problem(message=message, date=date, schedule_id=schedule.id)
+        for message in _route_evidence_problems(
+            label=label, schedule=schedule, route_facts=route_facts,
         )
     )
     return problems
@@ -589,12 +723,13 @@ def _clock_problems(*, label: str, schedule: Schedule) -> list[str]:
 def _intercity_problems(
     *,
     label: str,
+    date: str,
     schedule: Schedule,
     referenced: list[dict[str, Any]],
     transport_facts: list[dict[str, Any]],
     transport_code_pool: set[str],
-) -> list[str]:
-    problems: list[str] = []
+) -> list[Problem]:
+    problems: list[Problem] = []
     text = _schedule_text(schedule)
     intercity = _is_transport_leg(schedule, referenced, transport_facts)
 
@@ -602,19 +737,29 @@ def _intercity_problems(
         code for code in _mentioned_codes(text) if code not in transport_code_pool
     )
     if invented:
-        problems.append(
-            f"{label} 写了未经查询的班次号 {'、'.join(invented[:3])}；"
-            "只能使用保留事实中真实返回的航班号/车次号，否则不要写具体班次"
-        )
+        problems.append(Problem(
+            message=(
+                f"{label} 写了未经查询的班次号 {'、'.join(invented[:3])}；"
+                "只能使用保留事实中真实返回的航班号/车次号，否则不要写具体班次"
+            ),
+            date=date,
+            schedule_id=schedule.id,
+        ))
 
     if not intercity:
         return problems
 
     if not transport_facts:
-        problems.append(
-            f"{label} 是跨城大交通，但没有引用任何航班/车次事实；"
-            "请引用已查到的班次事实，或改写为不含具体时刻的待确认方案"
-        )
+        problems.append(Problem(
+            message=(
+                f"{label} 是跨城大交通，但没有引用任何航班/车次事实；"
+                "当前事实源没有返回可引用班次，"
+                "系统将清除依赖该班次的钟点并标记为待官方渠道确认"
+            ),
+            date=date,
+            schedule_id=schedule.id,
+            resolution="defer",
+        ))
         return problems
 
     allowed_departures = sorted(
@@ -626,10 +771,14 @@ def _intercity_problems(
     )
     start = _normalize_clock(schedule.start_time)
     if start and allowed_departures and start not in allowed_departures:
-        problems.append(
-            f"{label} 的出发时间 {schedule.start_time} 不是所引用班次的真实发车/起飞时刻；"
-            f"只能取其中之一：{'、'.join(allowed_departures)}"
-        )
+        problems.append(Problem(
+            message=(
+                f"{label} 的出发时间 {schedule.start_time} 不是所引用班次的真实发车/起飞时刻；"
+                f"只能取其中之一：{'、'.join(allowed_departures)}"
+            ),
+            date=date,
+            schedule_id=schedule.id,
+        ))
 
     allowed_arrivals = sorted(
         {
@@ -640,10 +789,14 @@ def _intercity_problems(
     )
     end = _normalize_clock(schedule.end_time)
     if end and allowed_arrivals and end not in allowed_arrivals:
-        problems.append(
-            f"{label} 的到达时间 {schedule.end_time} 不是所引用班次的真实到达时刻；"
-            f"只能取其中之一：{'、'.join(allowed_arrivals)}"
-        )
+        problems.append(Problem(
+            message=(
+                f"{label} 的到达时间 {schedule.end_time} 不是所引用班次的真实到达时刻；"
+                f"只能取其中之一：{'、'.join(allowed_arrivals)}"
+            ),
+            date=date,
+            schedule_id=schedule.id,
+        ))
     return problems
 
 
@@ -730,6 +883,23 @@ def _route_endpoint_problems(
     place = (schedule.place_name or "").strip()
     if len(place) < 3:
         return []
+    # AMap driving directions are directional. A route from the hotel to an
+    # attraction cannot verify the return leg merely because it mentions both
+    # endpoints; the observed model output reused the outbound duration twice.
+    if re.search(r"返回|回到", schedule.activity):
+        destination_match = any(
+            _matches_route_endpoint(place, str(fact.get("destination") or ""))
+            for fact in route_facts
+        )
+        origin_match = any(
+            _matches_route_endpoint(place, str(fact.get("origin") or ""))
+            for fact in route_facts
+        )
+        if origin_match and not destination_match:
+            return [
+                f"{label} 将去程路线事实用于返回「{place}」；"
+                "请查询返程路线，或删除未经核实的返程距离与用时"
+            ]
     for fact in route_facts:
         endpoints = [
             str(fact.get("origin") or ""),
@@ -749,6 +919,12 @@ def _route_endpoint_problems(
         f"{label} 的地点「{place}」不是所引路线事实的起终点（{endpoint_text}）；"
         "不得把一个地点的路线套用到另一个地点，请补查该地点的实际路线"
     ]
+
+
+def _matches_route_endpoint(place: str, endpoint: str) -> bool:
+    return bool(endpoint and (
+        endpoint in place or place in endpoint or _shares_place_core(place, endpoint)
+    ))
 
 
 # A shared city prefix alone must not count as a match, so the overlap has to

@@ -40,6 +40,8 @@ export interface Postcard {
     | "ai_art_direction_no_text_v5"
     | "local_art_direction_v5"
     | "local_art_direction_no_text_v5"
+    | "ai_model_integrated_v6"
+    | "source_photo_fallback_v6"
     | null
   promptVersion?: string | null
 }
@@ -51,6 +53,9 @@ export interface UploadedPhoto {
   imageUrl: string
   takenAt: string | null
   location: string | null
+  latitude?: number | null
+  longitude?: number | null
+  altitude?: number | null
 }
 
 /* ---------------- 文件资源 (FileAsset) ---------------- */
@@ -60,7 +65,7 @@ export interface FileAsset {
   relativePath: string
   mimeType: string
   sizeBytes: number
-  usageType: "upload" | "generated_postcard" | "generated_report_cover" | "system"
+  usageType: "upload" | "generated_postcard" | "generated_report_cover" | "generated_plan_cover" | "system"
   status: "temporary" | "attached" | "deleted"
   refCount: number
 }
@@ -172,11 +177,88 @@ export interface TravelProfileData {
   profileStage?: string
   returningMotifs?: string[]
   newFacets?: string[]
+  /* —— 旅格 v5 —— */
+  journey?: JourneyMeta | null
+  axes?: PersonaAxis[]
+  tripWord?: string | null
+  tripWordNote?: string | null
+  stats?: JourneyStat[]
+  palette?: PaletteColor[]
+  signatureFrame?: SignatureFrame | null
+  /** 旧报告可能仍带此字段。搭子匹配是独立功能，报告页不再展示。 */
+  partner?: PersonaPartner | null
+  nextStops?: NextStop[]
+  personaVector?: { version: number; dims: string[]; values: number[] } | null
+  evolutionFrom?: string | null
+}
+
+export interface JourneyMeta {
+  title: string
+  destination?: string | null
+  route: string[]
+  spots: string[]
+  dayCount?: number | null
+  photoCount: number
+  cityCount: number
+  pathKm?: number | null
+}
+
+export interface PersonaAxis {
+  id: "scene" | "pace" | "time" | "lens"
+  name: string
+  leftPole: string
+  rightPole: string
+  leftLabel: string
+  rightLabel: string
+  /** 0 = 完全偏左极，100 = 完全偏右极 */
+  value: number
+  pole: string
+  evidence: string
+  confidence: number
+}
+
+export interface JourneyStat {
+  id: string
+  label: string
+  value: string
+  unit: string
+  caption: string
+  assetId?: string | null
+  imageUrl?: string | null
+}
+
+export interface PaletteColor {
+  name: string
+  hex: string
+  share: number
+}
+
+export interface SignatureFrame {
+  assetId: string
+  imageUrl?: string | null
+  caption: string
+  place?: string | null
+  moment?: string | null
+}
+
+export interface PersonaPartner {
+  code: string
+  name: string
+  line: string
+}
+
+export interface NextStop {
+  kind: "continue" | "contrast"
+  title: string
+  destination: string
+  reason: string
+  planningPrompt: string
 }
 
 /* ---------------- 雷达图数据点 (ReportChartPoint) ---------------- */
 
 export type RadarDimension = "自然探索" | "人文体验" | "美食偏好" | "慢节奏" | "社交意愿"
+  | "山海自然" | "城市街区" | "人文故事" | "在地味道" | "夜色光影"
 
 export interface ReportChartPoint {
   dimension: RadarDimension
@@ -351,7 +433,7 @@ export interface TravelMemoryStats {
   planCount: number
 }
 
-export interface TravelMemoryFootprint {
+  export interface TravelMemoryFootprint {
   id: string
   tripId: string
   title: string
@@ -364,11 +446,12 @@ export interface TravelMemoryFootprint {
   travelTypes: string[]
   highlights: string[]
   paceLabel?: string | null
-  photoCount: number
-  planCount: number
-}
+    photoCount: number
+    planCount: number
+    hasPhotoObservation?: boolean
+  }
 
-export interface TravelMemoryPattern {
+  export interface TravelMemoryPattern {
   id: string
   title: string
   content: string
@@ -379,8 +462,15 @@ export interface TravelMemoryPattern {
   sourceLabels: string[]
   confirmable: boolean
   confirmed: boolean
-  planningText?: string | null
-}
+    planningText?: string | null
+    sourcePhotos?: TravelMemorySourcePhoto[]
+  }
+
+  export interface TravelMemorySourcePhoto {
+    tripId: string
+    assetId: string
+    imageUrl: string
+  }
 
 export interface TravelMemoryDisplay {
   intro: string | null
@@ -409,8 +499,48 @@ export interface ItineraryData {
   itinerary: DailyItinerary[]
   experience_summary?: ExperienceSummary | null
   /** Gate-authored caveats for findings that are not tied to a single schedule row. */
-  advisories?: string[]
-}
+    advisories?: string[]
+    /** Backend-selected confirmed memories supplied to this planning run. */
+    memory_context?: PlanningMemoryContext | null
+    /** Backend-checked links between a selected memory and a schedule. */
+    memory_basis?: PlanningMemoryBasis[]
+    /** Saved user requirement record for the original confirmed full plan. */
+    planning_snapshot?: PlanningRequestSnapshot | null
+  }
+
+  export interface PlanningRequestSnapshot {
+    brief: PlanningBrief
+    confirmation_token: string
+    planning_model: PlanningModel
+  }
+
+  export interface PlanningMemoryItem {
+    id: string
+    text: string
+    category: string
+    source_kind: string
+    source_trip_id?: string | null
+    source_trip_title?: string | null
+    source_trip_ids?: string[]
+    relevance_score?: number
+    source_photos?: { trip_id: string; asset_id: string; image_url: string }[]
+  }
+
+  export interface PlanningMemoryContext {
+    enabled: boolean
+    selected: PlanningMemoryItem[]
+    skipped_count: number
+    excluded_ids?: string[]
+  }
+
+  export interface PlanningMemoryBasis {
+    memory_id: string
+    schedule_id: string
+    matched_term: string
+    schedule_excerpt: string
+    fact_refs: string[]
+    match_kind?: "literal" | "scene"
+  }
 
 export interface ExperienceSummary {
   tripTheme?: string
@@ -484,7 +614,7 @@ export interface Schedule {
   transport_mode?: "driving" | "transit" | "walking" | "bicycling" | null
   tags?: string[]
   booking_required?: boolean
-  fact_status?: "verified" | "reference" | "unverified" | null
+  fact_status?: "verified" | "unverified" | null
   fact_refs?: string[]
   action?: {
     type: "map" | "booking" | "details" | "alternative" | "complete"

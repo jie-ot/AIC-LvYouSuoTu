@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.ai import orchestrator
+from app.ai import orchestrator, planning_feasibility
 from app.core import planning_progress
 from app.core.business_logging import log_event, timed_stage
 from app.core.exceptions import (
@@ -26,13 +26,14 @@ from app.models.dto import (
     PlanningRequest,
     PlanningResponse,
 )
-from app.models.itinerary import ItineraryData
+from app.models.itinerary import ItineraryData, PlanningRequestSnapshot
 from app.services import (
     daily_map_service,
     id_service,
     itinerary_id_service,
     itinerary_validation_service,
     memory_service,
+    planning_memory_service,
     planning_intake_service,
     travel_fact_service,
 )
@@ -63,15 +64,42 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
     """Advance requirement chat or generate after explicit confirmation."""
     if not request.message or not request.message.strip():
         raise InvalidParamError("规划需求不能为空")
+    if (
+        not request.use_memory
+        and request.context is not None
+        and request.context.memory_context is not None
+        and request.context.memory_context.enabled
+        and request.context.memory_context.selected
+    ):
+        raise InvalidParamError("不使用旅行记忆的对照规划请从需求清单重新生成完整行程")
+    if (
+        request.context is not None
+        and request.context.memory_context is not None
+        and set(request.excluded_memory_ids) & {
+            item.id for item in request.context.memory_context.selected
+        }
+    ):
+        raise InvalidParamError("排除指定旅行记忆的对照规划请从需求清单重新生成完整行程")
     _validate_conversation_model(request)
 
     planning_progress.report("reading_memory")
     with timed_stage("planning_read_memory"):
         with session_scope() as session:
             memory = memory_service.get_or_create_current_memory(session, user_id)
-            memory_summary = memory_service.build_memory_summary(memory)
+            memory_json = getattr(memory, "memory_json", None)
+            selected_memory = planning_memory_service.select_memory(
+                memory_json,
+                brief=request.brief,
+                current_message=request.message,
+                use_memory=request.use_memory,
+                context_destinations=[request.context.trip_info.destination] if request.context else None,
+                excluded_memory_ids=request.excluded_memory_ids,
+            )
+            memory_summary = planning_memory_service.prompt_text(selected_memory)
 
     try:
+        confirmed_brief = None
+        expected_confirmation_token = None
         if request.context is None and not request.confirmed:
             return _collect_requirements(
                 user_id=user_id,
@@ -129,6 +157,15 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 brief,
                 request.message,
             )
+            confirmed_brief = brief
+            selected_memory = planning_memory_service.select_memory(
+                memory_json,
+                brief=brief,
+                current_message=planning_message,
+                use_memory=request.use_memory,
+                excluded_memory_ids=request.excluded_memory_ids,
+            )
+            memory_summary = planning_memory_service.prompt_text(selected_memory)
             log_event(
                 "planning_confirmation_accepted",
                 status="confirmed",
@@ -138,9 +175,7 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 planning_model=request.planning_model,
             )
 
-        # Do not pre-inject ready-made B-class guidance. A/A′ facts are obtained
-        # through the Function Calling loop; the prompt supplies B-class fallback
-        # rules for use only after a relevant tool fails or is unavailable.
+        # External facts are obtained through the function-calling loop.
         request_id = id_service.new_id("toolreq_")
         log_event(
             "planning_tool_request_created",
@@ -169,8 +204,6 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                         "planning_fact_pack_result",
                         status="success",
                         tool_calls=len(pack.tool_calls),
-                        booking_evidences=len(pack.booking_evidences),
-                        rails=len(pack.rails),
                         weather=len(pack.weather),
                         pois=len(pack.pois),
                         summary=_summarize_fact_pack(fact_pack_dict),
@@ -263,6 +296,33 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
                 aligned,
                 request.planning_model,
                 facts=retained_facts,
+            )
+            aligned, deferred_dates = planning_feasibility.defer_unanchored_intercity_times(
+                aligned, retained_facts,
+            )
+            if deferred_dates:
+                itinerary_validation_service.validate_itinerary(aligned)
+                log_event(
+                    "planning_unanchored_intercity_times_deferred",
+                    status="corrected",
+                    dates=deferred_dates,
+                )
+            # Discard any model-provided provenance and derive checkable links
+            # only from the selected memory and validated final schedule IDs.
+            aligned.memory_context = selected_memory
+            aligned.memory_basis = planning_memory_service.build_basis(
+                aligned, selected_memory, retained_facts=retained_facts,
+            )
+            # This is a saved user requirement record. A refinement invalidates
+            # the original brief; model-supplied snapshots are never accepted.
+            aligned.planning_snapshot = (
+                PlanningRequestSnapshot(
+                    brief=confirmed_brief.model_dump(by_alias=True),
+                    confirmation_token=expected_confirmation_token,
+                    planning_model=request.planning_model,
+                )
+                if confirmed_brief is not None and expected_confirmation_token is not None
+                else None
             )
         log_event(
             "planning_result",
@@ -421,22 +481,11 @@ def _summarize_fact_pack(fact_pack: dict[str, Any] | None) -> dict[str, Any] | N
         "routes": _summarize_facts(fact_pack.get("routes") or []),
         "weather": _summarize_facts(fact_pack.get("weather") or []),
         "pois": _summarize_facts(fact_pack.get("pois") or []),
-        "rails": _summarize_facts(fact_pack.get("rails") or []),
-        "booking_evidences": [
-            {
-                "booking_type": item.get("booking_type"),
-                "official_channel": item.get("official_channel"),
-                "query_hint": item.get("query_hint"),
-                "status": item.get("status"),
-            }
-            for item in (fact_pack.get("booking_evidences") or [])
-        ],
         "tool_calls": [
             {
                 "tool_name": item.get("tool_name"),
                 "provider": item.get("provider"),
                 "status": item.get("status"),
-                "degraded_to_b": item.get("degraded_to_b"),
                 "latency_ms": item.get("latency_ms"),
                 "error_code": item.get("error_code"),
             }

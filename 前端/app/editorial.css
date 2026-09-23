@@ -2012,14 +2012,36 @@ body {
   font-weight: 650;
 }
 
+.memory-pattern-explain {
+  margin: -2px 2px 12px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.memory-pattern-photos {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.memory-pattern-photos a,
+.memory-pattern-photos img {
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+.memory-pattern-photos span { color: var(--ink-soft); font-size: 11px; }
+
 .memory-footprint-grid {
   display: grid;
   gap: 12px;
 }
 
 .memory-footprint-card {
-  display: grid;
-  grid-template-columns: 86px minmax(0, 1fr);
+  display: block;
   min-height: 128px;
   overflow: hidden;
   border: 1px solid var(--hairline);
@@ -2029,12 +2051,32 @@ body {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.025);
 }
 
-.memory-footprint-card > img,
+.memory-footprint-open {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  min-height: 128px;
+  color: inherit;
+}
+
+.memory-footprint-open > img,
 .memory-footprint-placeholder {
   width: 86px;
   height: 100%;
   min-height: 128px;
   object-fit: cover;
+}
+
+.memory-observation-delete {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 14px;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: right;
 }
 
 .memory-footprint-placeholder {

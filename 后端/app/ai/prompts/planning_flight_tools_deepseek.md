@@ -1,7 +1,10 @@
-以下三项飞友工具只在 DeepSeek 规划中可用，返回结果只能标 `reference`，最终分别以航司/机场和 12306 官方实时信息为准：
+以下六项飞友工具只在 DeepSeek 规划中可用。所有 `status=ok` 的返回都作为事实，引用时保留 `fact_id` 并标记 `verified`：
 
-- `searchFlightItineraries` 按出发城市、到达城市 IATA 三字码和 `depDate` 查询指定日期航班方案。保留完整候选以及最低价、最短耗时、推荐方案中的航班号、完整起降日期时间、耗时、是否中转、舱等和价格；去重代码共享并区分实际承运航司。查询结果和价格都是参考，出票前须在航司或正规售票平台复核。
-- `searchFlightsTransferinfo` 按出发机场、到达机场 IATA 三字码和 `depdate` 查询纯航班一次中转方案，但上游只覆盖从查询时点起至多未来 48 小时。只在直飞不可用或中转确有价值时调用，保留每段航班号、机场、航站楼、时区、平均延误和衔接时间，并检查中转缓冲。
-- `searchFlightandTrainTransferinfo` 按城市 IATA 三字码和日期查询空铁一次中转候选。每个入选铁路段必须下一轮按实际车站/城市和日期调用 `query_rail_tickets`，由原 12306 MCP 查询车次、时刻、票价和余票参考；飞友结果不能替代铁路核验。
-- 同一轮互不依赖的指定日期航班方案、纯航班中转、空铁中转与其他事实查询应并行发起；需要先取得中转铁路段起终点的 12306 查询放到下一轮。
-- 未经工具返回，不得编造航班号、起降时刻、航站楼、机型、中转点、延误、票价或余票。
+- `searchFlightsByDepArr` 按日期与出发、到达机场或城市 IATA 三字码查询直飞航班。出发端只能在 `dep`、`depcity` 中选一个，到达端只能在 `arr`、`arrcity` 中选一个。
+- `getFlightTransferInfo` 按 `depcity`、`arrcity`、`depdate` 查询纯航班中转方案。只在直飞不可用或中转确有价值时调用，并检查每段航班号、机场、航站楼、衔接时间和延误风险。
+- `searchFlightItineraries` 按 `depCityCode`、`arrCityCode`、`depDate` 查询指定日期航线方案，用于比较价格、耗时、舱等、直飞与中转候选。
+- `getFlightAndTrainTransferInfo` 按 `depcity`、`arrcity`、`depdate` 查询空铁联运方案，核对每一段及换乘缓冲。
+- `searchTrainTickets` 按 `from_city`、`to_city`、`date` 查询火车票、车次、时刻与席别信息。
+- `searchTrainStations` 按 `query` 查询火车站，用于城市或车站名称有歧义时确定后续查询参数。
+- 同一轮互不依赖的直飞、中转、航线方案、空铁联运、火车票与车站查询应并行发起；只有依赖上一轮结果的查询才放到下一轮。
+- 未经工具成功返回，不得编造航班号、车次、起降或到发时刻、航站楼、机型、中转点、延误、票价或余票。

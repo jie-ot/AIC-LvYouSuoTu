@@ -77,7 +77,7 @@ def upgrade() -> None:
         bind.execute(trips.insert().values(
             id=trip_id,
             user_id=row["user_id"],
-            title=location if location and location not in {"未知目的地", "未知地点"} else "未命名旅行",
+            title=location if location and location not in {"未知目的地", "未知地点"} else "旅行影像",
             location=location,
             start_date=row.get("start_date"),
             end_date=row.get("end_date"),

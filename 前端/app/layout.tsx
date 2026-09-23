@@ -6,6 +6,7 @@ import { MobileShell } from '@/components/shared/mobile-shell'
 import './globals.css'
 import './journal.css'
 import './editorial.css'
+import './persona.css'
 
 export const metadata: Metadata = {
   title: '旅有所图',

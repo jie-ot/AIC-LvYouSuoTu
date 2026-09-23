@@ -8,6 +8,7 @@ import { useApp } from "@/components/shared/app-context"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { EmptyState } from "@/components/shared/empty-state"
 import { PLACEHOLDER_IMAGE, handleImageError, resolveAssetUrl } from "@/lib/asset"
+import { displayPlace } from "@/lib/place"
 import { savePostcardImage } from "@/lib/postcard-save"
 import type { Postcard } from "@/types"
 
@@ -16,8 +17,11 @@ const LONG_PRESS_MOVE_TOLERANCE = 12
 
 export function PostcardCollectionView() {
   const searchParams = useSearchParams()
-  const { postcardGroups, goBackTo, toast } = useApp()
+  const { postcardGroups, trips, goBackTo, toast } = useApp()
   const group = postcardGroups.find((g) => g.id === searchParams.get("groupId"))
+  const place = group
+    ? displayPlace(group.location, trips.find((trip) => trip.id === group.tripId)?.title)
+    : ""
   const returnTripId = searchParams.get("tripId") ?? group?.tripId
   const backHref = searchParams.get("from") === "trip" && returnTripId
     ? `/trips/detail?tripId=${encodeURIComponent(returnTripId)}`
@@ -150,7 +154,7 @@ export function PostcardCollectionView() {
       <div className="viewer-caption">
         <p className="viewer-location">
           <MapPin className="size-3.5" aria-hidden />
-          {group.location} · {group.dateLabel}
+          {[place, group.dateLabel].filter(Boolean).join(" · ")}
         </p>
         <h2 className="viewer-title">{current?.title}</h2>
         <div className="viewer-dots">

@@ -136,6 +136,13 @@ export const realApi: TravelApi = {
     )
   },
 
+  deleteTravelPhotoObservation(tripId: string, expectedVersion: number) {
+    return apiClient<TravelMemoryDisplay>(
+      `/memories/travel/observations/${encodeURIComponent(tripId)}?expectedVersion=${encodeURIComponent(String(expectedVersion))}`,
+      jsonInit("DELETE"),
+    )
+  },
+
   updateTravelMemorySettings(input: { enabled: boolean; expectedVersion: number }) {
     return apiClient<TravelMemoryDisplay>("/memories/travel/settings", jsonInit("PATCH", input))
   },

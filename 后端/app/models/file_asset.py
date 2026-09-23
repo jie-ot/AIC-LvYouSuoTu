@@ -28,7 +28,7 @@ class FileAsset(SQLModel, table=True):
     relative_path: str = Field(nullable=False)
     mime_type: str = Field(nullable=False)
     size_bytes: int = Field(nullable=False)
-    # upload / generated_postcard / generated_report_cover / system
+    # upload / generated_postcard / generated_report_cover / generated_plan_cover / system
     usage_type: str = Field(nullable=False)
     # temporary / attached / deleted
     status: str = Field(nullable=False)

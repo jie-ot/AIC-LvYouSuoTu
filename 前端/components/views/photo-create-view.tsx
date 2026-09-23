@@ -17,6 +17,7 @@ import { ProgressLoader } from "@/components/shared/progress-loader";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import type { GenerateResult } from "@/lib/api";
 import { shortId } from "@/lib/asset";
+import { displayPlace } from "@/lib/place";
 interface PickedPhoto {
   id: string;
   url: string;
@@ -81,7 +82,7 @@ export function PhotoCreateView() {
   const [requirements, setRequirements] = useState("");
   const [memoryRequirements, setMemoryRequirements] = useState("");
   const [postcards, setPostcards] = useState(entryMode !== "report");
-  const [report, setReport] = useState(entryMode !== "postcard");
+  const [report, setReport] = useState(entryMode === "report");
   const [postcardCount, setPostcardCount] = useState(3);
   const [learnPreferences, setLearnPreferences] = useState(false);
   const [resolvedTripId, setResolvedTripId] = useState(sourceTripId);
@@ -178,6 +179,10 @@ export function PhotoCreateView() {
       toast("请选择明信片或旅行报告", "info");
       return;
     }
+    if (report && photos.length < 10) {
+      toast(`旅行人格报告至少需要 10 张照片，还差 ${10 - photos.length} 张`, "info");
+      return;
+    }
     const normalizedRequirements = requirements.trim();
     const normalizedMemoryRequirements = memoryRequirements.trim();
     if (learnPreferences && !normalizedMemoryRequirements) {
@@ -269,7 +274,7 @@ export function PhotoCreateView() {
         ? { label: "明信片", status: created.postcardStatus }
         : null,
       created.reportStatus && created.reportStatus !== "skipped"
-        ? { label: "旅行报告", status: created.reportStatus }
+        ? { label: "旅行人格报告", status: created.reportStatus }
         : null,
       created.memoryStatus && created.memoryStatus !== "skipped"
         ? { label: "旅行记忆", status: created.memoryStatus }
@@ -307,7 +312,8 @@ export function PhotoCreateView() {
           <span className={`created-check ${needsAttention ? "is-partial" : ""}`}>
             {needsAttention ? <TriangleAlert size={30} /> : <Check size={30} />}
           </span>
-          <h2>{created.postcardGroup?.location || created.report?.location}</h2>
+          <h2>{created.report?.profileData?.journey?.title
+            || displayPlace(created.postcardGroup?.location || created.report?.location, created.trip?.title)}</h2>
           {needsAttention ? (
             <section className="created-partial-panel" aria-live="polite">
               <strong>
@@ -405,7 +411,7 @@ export function PhotoCreateView() {
   return (
     <div className="create-page">
       <TopBar
-        title={entryMode === "postcard" ? "制作明信片" : entryMode === "report" ? "生成旅行报告" : "用照片创建"}
+        title={entryMode === "postcard" ? "制作明信片" : entryMode === "report" ? "生成旅行人格报告" : "用照片创建"}
         onBack={back}
         backLabel={backLabel}
         showUserBadge={false}
@@ -482,8 +488,8 @@ export function PhotoCreateView() {
                 set: setPostcards,
               },
               {
-                name: "旅行报告",
-                benefit: "整理这组照片",
+                name: "旅行人格报告",
+                benefit: "至少 10 张照片",
                 icon: FileText,
                 value: report,
                 set: setReport,
@@ -506,6 +512,7 @@ export function PhotoCreateView() {
               </button>
             ))}
           </div>
+          {report && photos.length < 10 ? <p className="memory-observation-note">还需添加 {10 - photos.length} 张照片，才能生成旅行人格报告。</p> : null}
         </section>
         {postcards && (
           <label className="postcard-count-choice">
@@ -535,6 +542,7 @@ export function PhotoCreateView() {
             rows={3}
           />
         </label>
+        <p className="memory-observation-note">生成后会记录照片中的地点和场景，作为待你确认的旅行线索；可在旅行记忆页清除。</p>
         <label className="memory-consent">
           <input
             type="checkbox"
@@ -543,8 +551,8 @@ export function PhotoCreateView() {
             onChange={(event) => setLearnPreferences(event.target.checked)}
           />
           <span>
-            <strong>加入旅行记忆</strong>
-            <small>只保存你填写的旅行要求；照片和制作样式不会保存。</small>
+            <strong>保存我填写的旅行要求</strong>
+            <small>勾选后，下方要求才会用于后续规划；明信片制作样式不会作为偏好。</small>
           </span>
         </label>
         {learnPreferences ? <label className="create-prompt">
@@ -581,10 +589,10 @@ export function PhotoCreateView() {
             ? "正在生成…"
             : photos.length
               ? postcards && report
-                ? "生成明信片和旅行报告"
+                ? "生成明信片和旅行人格报告"
                 : postcards
                   ? "生成明信片"
-                  : "生成旅行报告"
+                  : "生成旅行人格报告"
               : "选择照片"}
           {!generating &&
             (photos.length ? (

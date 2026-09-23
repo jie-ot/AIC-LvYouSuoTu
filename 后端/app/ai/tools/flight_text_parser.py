@@ -107,7 +107,7 @@ def parse_flight_text(text: str | None) -> list[dict[str, Any]]:
                 "cabin": cabin_match.group("cabin") if cabin_match else None,
                 "price_cny": float(price_match.group("price")) if price_match else None,
                 "selection_role": _role_for_offset(text, match.start()),
-                "fact_status": "reference",
+                "fact_status": "verified",
             }
         )
     _annotate_codeshare(candidates)

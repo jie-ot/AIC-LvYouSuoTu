@@ -7,6 +7,7 @@ import json
 from datetime import date
 
 from app.models.dto import PlanningBrief, PlanningChecklistItem
+from app.models.itinerary import PlanningRequestSnapshot
 
 _NULL_TEXT = {"", "null", "none", "未知", "未说明", "待确认"}
 _CONFIRMATION_SCHEMA = "planning-brief-v1"
@@ -166,6 +167,25 @@ def confirmation_token(brief: PlanningBrief) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validated_snapshot_brief(snapshot: PlanningRequestSnapshot) -> PlanningBrief | None:
+    """Check a saved requirement record against the current intake contract.
+
+    The digest checks consistency only. A plan-save client can author this
+    record, so callers must not treat it as proof of server issuance.
+    """
+    try:
+        brief = finalize_brief(PlanningBrief.model_validate(snapshot.brief))
+    except (TypeError, ValueError):
+        return None
+    if missing_required_fields(brief):
+        return None
+    if brief.model_dump(by_alias=True) != snapshot.brief:
+        return None
+    if confirmation_token(brief) != snapshot.confirmation_token:
+        return None
+    return brief
 
 
 def compose_detail_requirements(brief: PlanningBrief) -> str:

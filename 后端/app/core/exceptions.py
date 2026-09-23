@@ -42,6 +42,17 @@ class AIGenerationError(BusinessError):
 class ImageInputPolicyError(AIGenerationError):
     """Image generation input was explicitly rejected by provider policy."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        input_kind: str = "unknown",
+        provider_code: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.input_kind = input_kind
+        self.provider_code = provider_code
+
 
 class InternalError(BusinessError):
     """Service config / model permission / download / disk failure → 1003."""

@@ -136,6 +136,23 @@ def confirm_travel_memory_pattern(
     return _response(memory, session, current_user_id)
 
 
+@router.delete("/memories/travel/observations/{trip_id}")
+def delete_travel_photo_observation(
+    trip_id: str,
+    expected_version: int | None = Query(default=None, alias="expectedVersion", ge=1),
+    current_user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+) -> dict:
+    memory = memory_service.delete_trip_observation(
+        session,
+        user_id=current_user_id,
+        trip_id=trip_id,
+        expected_version=expected_version,
+    )
+    session.commit()
+    return _response(memory, session, current_user_id)
+
+
 @router.put("/memories/travel/descriptions/{description_id}")
 def update_travel_memory_description(
     description_id: str,

@@ -19,10 +19,12 @@ TOOL_AMAP_POI_SEARCH = "amap_poi_search"
 TOOL_AMAP_POI_AROUND = "amap_poi_around"
 TOOL_AMAP_POI_DETAIL = "amap_poi_detail"
 TOOL_AMAP_ROUTE = "amap_route"
-TOOL_QUERY_RAIL = "query_rail_tickets"
+TOOL_SEARCH_FLIGHTS_BY_DEP_ARR = "searchFlightsByDepArr"
+TOOL_GET_FLIGHT_TRANSFER_INFO = "getFlightTransferInfo"
 TOOL_SEARCH_FLIGHT_ITINERARIES = "searchFlightItineraries"
-TOOL_SEARCH_FLIGHT_TRANSFER = "searchFlightsTransferinfo"
-TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER = "searchFlightandTrainTransferinfo"
+TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO = "getFlightAndTrainTransferInfo"
+TOOL_SEARCH_TRAIN_TICKETS = "searchTrainTickets"
+TOOL_SEARCH_TRAIN_STATIONS = "searchTrainStations"
 TOOL_DECLARE_TRIP_SCOPE = "declare_trip_scope"
 TOOL_UPDATE_PLANNING_FACT_STATE = "update_planning_fact_state"
 TOOL_FINISH_RESEARCH = "finish_research"
@@ -200,17 +202,78 @@ class RouteArgs(AliasModel):
         return self
 
 
-class RailArgs(BaseModel):
-    origin: str
-    destination: str
-    date: str  # YYYY-MM-DD
+class FlightByDepArrArgs(BaseModel):
+    date: str
+    dep: str | None = None
+    depcity: str | None = None
+    arr: str | None = None
+    arrcity: str | None = None
 
-    @field_validator("origin", "destination", "date")
+    @field_validator("dep", "depcity", "arr", "arrcity")
     @classmethod
-    def _non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
+    def _iata_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if len(code) != 3 or not code.isascii() or not code.isalpha():
+            raise ValueError("must be a three-letter IATA code")
+        return code
+
+    @field_validator("date")
+    @classmethod
+    def _iso_date(cls, value: str) -> str:
+        cleaned = value.strip()
+        date.fromisoformat(cleaned)
+        return cleaned
+
+    @model_validator(mode="after")
+    def _one_code_per_side(self) -> "FlightByDepArrArgs":
+        if (self.dep is None) == (self.depcity is None):
+            raise ValueError("provide exactly one of dep or depcity")
+        if (self.arr is None) == (self.arrcity is None):
+            raise ValueError("provide exactly one of arr or arrcity")
+        if (self.dep or self.depcity) == (self.arr or self.arrcity):
+            raise ValueError("departure and arrival must be different")
+        return self
+
+
+class TrainTicketsArgs(BaseModel):
+    from_city: str
+    to_city: str
+    date: str
+
+    @field_validator("from_city", "to_city")
+    @classmethod
+    def _city_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
             raise ValueError("must be non-empty")
-        return v.strip()
+        return cleaned
+
+    @field_validator("date")
+    @classmethod
+    def _iso_date(cls, value: str) -> str:
+        cleaned = value.strip()
+        date.fromisoformat(cleaned)
+        return cleaned
+
+    @model_validator(mode="after")
+    def _different_cities(self) -> "TrainTicketsArgs":
+        if self.from_city == self.to_city:
+            raise ValueError("from_city and to_city must be different")
+        return self
+
+
+class TrainStationsArgs(BaseModel):
+    query: str
+
+    @field_validator("query")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must be non-empty")
+        return cleaned
 
 
 class FlightItinerariesArgs(AliasModel):
@@ -296,15 +359,17 @@ ARG_SCHEMAS: dict[str, type[BaseModel]] = {
     TOOL_AMAP_POI_AROUND: PoiAroundArgs,
     TOOL_AMAP_POI_DETAIL: PoiDetailArgs,
     TOOL_AMAP_ROUTE: RouteArgs,
-    TOOL_QUERY_RAIL: RailArgs,
+    TOOL_SEARCH_FLIGHTS_BY_DEP_ARR: FlightByDepArrArgs,
+    TOOL_GET_FLIGHT_TRANSFER_INFO: FlightTrainTransferArgs,
     TOOL_SEARCH_FLIGHT_ITINERARIES: FlightItinerariesArgs,
-    TOOL_SEARCH_FLIGHT_TRANSFER: FlightTrainTransferArgs,
-    TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER: FlightTrainTransferArgs,
+    TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO: FlightTrainTransferArgs,
+    TOOL_SEARCH_TRAIN_TICKETS: TrainTicketsArgs,
+    TOOL_SEARCH_TRAIN_STATIONS: TrainStationsArgs,
 }
 
 
 # Canonical OpenAI-compatible external tool definitions. Model-specific
-# filtering below exposes Tripmatch flight tools only to supported DeepSeek models.
+# filtering below exposes VariFlight tools only to supported DeepSeek models.
 PLANNING_EXTERNAL_TOOLS: list[dict] = [
     {
         "type": "function",
@@ -470,19 +535,22 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": TOOL_QUERY_RAIL,
-            "description": "查询两城之间某日期的火车票参考信息（车次/时刻/参考票价，来自社区 12306 MCP，参考级、非权威）。结果须以 12306 官方实时为准。",
+            "name": TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+            "description": "飞常准 Aviation MCP 直飞航班查询。城市使用 depcity/arrcity，指定机场使用 dep/arr；出发和到达两侧各选一种代码，不得同侧混用。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "origin": {"type": "string", "description": "出发城市"},
-                    "destination": {"type": "string", "description": "到达城市"},
-                    "date": {
-                        "type": "string",
-                        "description": "乘车日期，格式 YYYY-MM-DD",
-                    },
+                    "date": {"type": "string", "format": "date", "description": "航班日期，格式 YYYY-MM-DD"},
+                    "dep": {"type": "string", "pattern": "^[A-Za-z]{3}$", "description": "出发机场 IATA 三字码；与 depcity 二选一"},
+                    "depcity": {"type": "string", "pattern": "^[A-Za-z]{3}$", "description": "出发城市 IATA 三字码；与 dep 二选一"},
+                    "arr": {"type": "string", "pattern": "^[A-Za-z]{3}$", "description": "到达机场 IATA 三字码；与 arrcity 二选一"},
+                    "arrcity": {"type": "string", "pattern": "^[A-Za-z]{3}$", "description": "到达城市 IATA 三字码；与 arr 二选一"},
                 },
-                "required": ["origin", "destination", "date"],
+                "required": ["date"],
+                "allOf": [
+                    {"oneOf": [{"required": ["dep"]}, {"required": ["depcity"]}]},
+                    {"oneOf": [{"required": ["arr"]}, {"required": ["arrcity"]}]},
+                ],
             },
         },
     },
@@ -490,7 +558,7 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": TOOL_SEARCH_FLIGHT_ITINERARIES,
-            "description": "飞友 Aviation MCP 指定日期城市对航班方案查询。输入出发城市、到达城市 IATA 三字码和出发日期，保留上游返回的全部候选及最低价、最短耗时和推荐方案，字段可包含航班号、完整起降日期时间、耗时、是否中转、舱等与价格。适合回答某日从某城飞往某城的可选班次；最终仍须去重共享航班、区分实际承运航司，并以航司或正规售票平台实时信息为准。",
+            "description": "飞常准 Aviation MCP 在售航班行程摘要。返回匹配数量、最低价、最短耗时和推荐选项，适合快速比较城市对航班方案。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -517,8 +585,8 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": TOOL_SEARCH_FLIGHT_TRANSFER,
-            "description": "飞友 Aviation MCP 指定日期纯航班一次中转方案查询。输入出发机场、到达机场 IATA 三字码和计划起飞日期，返回查询时点起至多未来 48 小时内的一程航班中转候选，并保留出发地/机场、到达地/机场、每段航班号、平均延误、航站楼、时区等完整上游字段。只用于需要中转或直飞不可用时，不要替代直飞查询。",
+            "name": TOOL_GET_FLIGHT_TRANSFER_INFO,
+            "description": "飞常准 Aviation MCP 纯航班中转查询。按出发城市、到达城市 IATA 三字码和日期返回衔接航班方案；仅在直飞不可用或中转有明确价值时调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -545,8 +613,8 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
-            "description": "飞友 Tripmatch 指定日期航班/铁路一次中转方案查询。输入出发、到达城市 IATA 三字码和日期，保留上游返回的完整中转结构，用于比较直飞、经邻近机场或空铁联运候选。此工具只发现候选拓扑；其中每一段铁路班次、时刻、票价和余票必须再调用 query_rail_tickets，由原 12306 MCP 核验后才能写入行程。",
+            "name": TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+            "description": "飞常准 TripMatch MCP 空铁联运查询。按出发城市、到达城市 IATA 三字码和日期返回航班与火车组合方案。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -570,13 +638,46 @@ PLANNING_EXTERNAL_TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_SEARCH_TRAIN_TICKETS,
+            "description": "飞常准 TripMatch MCP 火车票查询。按中文出发城市、到达城市和日期返回车次、时刻、票价与余票。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_city": {"type": "string", "description": "中文出发城市名，如 合肥"},
+                    "to_city": {"type": "string", "description": "中文到达城市名，如 北京"},
+                    "date": {"type": "string", "format": "date", "description": "乘车日期，格式 YYYY-MM-DD"},
+                },
+                "required": ["from_city", "to_city", "date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_SEARCH_TRAIN_STATIONS,
+            "description": "飞常准 TripMatch MCP 火车站模糊搜索。按中文关键词返回站名、站码和所在城市；用于先核对不明确的车站名称。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "车站关键词，如 北京西"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 DEEPSEEK_ONLY_EXTERNAL_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        TOOL_GET_FLIGHT_TRANSFER_INFO,
         TOOL_SEARCH_FLIGHT_ITINERARIES,
-        TOOL_SEARCH_FLIGHT_TRANSFER,
-        TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+        TOOL_SEARCH_TRAIN_TICKETS,
+        TOOL_SEARCH_TRAIN_STATIONS,
     }
 )
 DEEPSEEK_ONLY_EXTERNAL_TOOLS: list[dict] = [

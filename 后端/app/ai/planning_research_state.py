@@ -23,9 +23,10 @@ _POI_TOOLS = frozenset(
 )
 _FLIGHT_TOOLS = frozenset(
     {
+        tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
         tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
     }
 )
 _LIST_SPLIT = re.compile(r"[、,/|；;]+")

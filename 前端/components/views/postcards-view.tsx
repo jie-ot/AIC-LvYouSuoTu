@@ -12,11 +12,14 @@ import {
   handleImageError,
   resolveAssetUrl,
 } from "@/lib/asset";
+import { displayPlace } from "@/lib/place";
 import type { PostcardGroup } from "@/types";
 export function PostcardsView() {
-  const { postcardGroups, navigate, deletePostcardGroup, deletingId } =
+  const { postcardGroups, trips, navigate, deletePostcardGroup, deletingId } =
     useApp();
   const [pending, setPending] = useState<PostcardGroup | null>(null);
+  const placeOf = (group: PostcardGroup) =>
+    displayPlace(group.location, trips.find((trip) => trip.id === group.tripId)?.title);
   return (
     <div className="app-page archive-page">
       <header className="collection-header">
@@ -43,14 +46,14 @@ export function PostcardsView() {
                       src={
                         resolveAssetUrl(group.coverImage) || PLACEHOLDER_IMAGE
                       }
-                      alt={group.location}
+                      alt={placeOf(group)}
                       loading="lazy"
                       onError={handleImageError}
                     />
                     <span>{group.postcards.length} 张</span>
                   </div>
                   <div className="postcard-archive-caption">
-                    <h3>{group.location}</h3>
+                    <h3>{placeOf(group)}</h3>
                     <span>{group.dateLabel}</span>
                     <ArrowUpRight size={18} />
                   </div>
@@ -86,7 +89,7 @@ export function PostcardsView() {
         title="删除这组明信片？"
         description={
           pending
-            ? `${pending.location} · ${pending.postcards.length} 张明信片`
+            ? `${placeOf(pending)} · ${pending.postcards.length} 张明信片`
             : ""
         }
         onClose={() => setPending(null)}

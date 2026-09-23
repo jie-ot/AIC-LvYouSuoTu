@@ -17,7 +17,10 @@ from app.ai.model_selection import DEFAULT_PLANNING_MODEL, PlanningModel
 from app.models.itinerary import ItineraryData
 
 # Outward enums (mirrored from the DB enum table & 1.4/1.5/1.7).
-RadarDimension = Literal["自然探索", "人文体验", "美食偏好", "慢节奏", "社交意愿"]
+RadarDimension = Literal[
+    "自然探索", "人文体验", "美食偏好", "慢节奏", "社交意愿",
+    "山海自然", "城市街区", "人文故事", "在地味道", "夜色光影",
+]
 VisualTheme = Literal[
     "forest_light",
     "ocean_blue",
@@ -30,14 +33,12 @@ VisualTheme = Literal[
 ]
 # Fixed radar dimension order for stable chart rendering.
 RADAR_DIMENSIONS: tuple[RadarDimension, ...] = (
-    "自然探索",
-    "人文体验",
-    "美食偏好",
-    "慢节奏",
-    "社交意愿",
+    "山海自然", "城市街区", "人文故事", "在地味道", "夜色光影",
 )
 
-UsageType = Literal["upload", "generated_postcard", "generated_report_cover", "system"]
+UsageType = Literal[
+    "upload", "generated_postcard", "generated_report_cover", "generated_plan_cover", "system"
+]
 AssetStatus = Literal["temporary", "attached", "deleted"]
 OwnerType = Literal["postcard_group", "postcard", "report", "plan", "user_memory"]
 ReferenceRole = Literal[
@@ -75,6 +76,8 @@ class Postcard(CamelModel):
         "ai_art_direction_no_text_v5",
         "local_art_direction_v5",
         "local_art_direction_no_text_v5",
+        "ai_model_integrated_v6",
+        "source_photo_fallback_v6",
     ] | None = None
     prompt_version: str | None = None
 
@@ -164,7 +167,7 @@ class TravelProfileData(CamelModel):
     travel_prescription: str | None = None
     souvenir_line: str | None = None
     visual_theme: VisualTheme
-    sample_quality: Literal["low", "medium", "high"] = "low"
+    sample_quality: Literal["low", "medium", "high"] = "high"
     confidence: float = Field(default=0, ge=0, le=1)
     traits: list[ProfileTraitAssessment] = Field(default_factory=list)
     scope_note: str = "仅根据本次旅行的照片和你填写的要求生成。"
@@ -176,6 +179,99 @@ class TravelProfileData(CamelModel):
     profile_stage: str = "初见"
     returning_motifs: list[str] = Field(default_factory=list, max_length=3)
     new_facets: list[str] = Field(default_factory=list, max_length=3)
+    # —— 旅格 v5: computed from photo time, GPS, pixels and visual semantics ——
+    journey: "JourneyMeta | None" = None
+    axes: list["PersonaAxis"] = Field(default_factory=list, max_length=4)
+    trip_word: str | None = None
+    trip_word_note: str | None = None
+    stats: list["JourneyStat"] = Field(default_factory=list, max_length=3)
+    palette: list["PaletteColor"] = Field(default_factory=list, max_length=5)
+    signature_frame: "SignatureFrame | None" = None
+    # Kept so older saved reports still parse. New reports leave it empty;
+    # traveller matching is a separate feature that reads persona_vector.
+    partner: "PersonaPartner | None" = None
+    next_stops: list["NextStop"] = Field(default_factory=list, max_length=2)
+    persona_vector: "PersonaVector | None" = None
+    evolution_from: str | None = None
+
+
+class JourneyMeta(CamelModel):
+    title: str
+    destination: str | None = None
+    route: list[str] = Field(default_factory=list)
+    spots: list[str] = Field(default_factory=list)
+    day_count: int | None = None
+    photo_count: int = 0
+    city_count: int = 0
+    path_km: int | None = None
+
+
+class PersonaAxis(CamelModel):
+    """One spectrum. ``value`` 0 sits on ``left_pole``, 100 on ``right_pole``.
+
+    ``pole`` is the one-character code used to build the seal. The poles and
+    labels are complete words shown at the two ends, such as 山野 and 城池.
+    """
+
+    id: Literal["scene", "pace", "time", "lens"]
+    name: str
+    left_pole: str
+    right_pole: str
+    left_label: str
+    right_label: str
+    value: int = Field(ge=0, le=100)
+    pole: str
+    evidence: str = ""
+    confidence: float = Field(default=0, ge=0, le=1)
+
+
+class JourneyStat(CamelModel):
+    id: str
+    label: str
+    value: str
+    unit: str = ""
+    caption: str = ""
+    asset_id: str | None = None
+    image_url: str | None = None
+
+
+class PaletteColor(CamelModel):
+    name: str
+    hex: str
+    share: int = Field(ge=0, le=100)
+
+
+class SignatureFrame(CamelModel):
+    asset_id: str
+    image_url: str | None = None
+    caption: str
+    place: str | None = None
+    moment: str | None = None
+
+
+class PersonaPartner(CamelModel):
+    code: str
+    name: str
+    line: str
+
+
+class NextStop(CamelModel):
+    kind: Literal["continue", "contrast"]
+    title: str
+    destination: str
+    reason: str
+    planning_prompt: str
+
+
+class PersonaVector(CamelModel):
+    """Fixed-order numeric signature for future traveller matching (all dims in 0–1)."""
+
+    version: int = 1
+    dims: list[str]
+    values: list[float]
+
+
+TravelProfileData.model_rebuild()
 
 
 # —— 1.6 Report ——
@@ -244,6 +340,9 @@ class UploadedPhoto(CamelModel):
     image_url: str
     taken_at: str | None
     location: str | None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    altitude: float | None = None
 
 
 # —— 1.5 FileAssetReference ——
@@ -365,6 +464,9 @@ class PlanningChecklistItem(CamelModel):
 class PlanningRequest(CamelModel):
     message: str
     planning_model: PlanningModel = DEFAULT_PLANNING_MODEL
+    # Request-scoped switch. It does not mutate the user's saved memory.
+    use_memory: bool = True
+    excluded_memory_ids: list[str] = Field(default_factory=list, max_length=6)
     # New plans collect requirements first. Existing plans may still be refined
     # directly by passing context + confirmed=true.
     context: ItineraryData | None = None
@@ -378,6 +480,14 @@ class PlanningRequest(CamelModel):
     # Client-generated, optional. When present the backend publishes stage
     # progress the client can poll while this request is still in flight.
     progress_token: str | None = Field(default=None, max_length=64)
+
+    @field_validator("excluded_memory_ids")
+    @classmethod
+    def normalize_excluded_memory_ids(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if any(len(item) > 80 for item in cleaned):
+            raise ValueError("旅行记忆 ID 过长")
+        return list(dict.fromkeys(cleaned))
 
 
 class PlanningResponse(CamelModel):
@@ -452,6 +562,13 @@ class TravelMemoryFootprint(CamelModel):
     pace_label: str | None = None
     photo_count: int = 0
     plan_count: int = 0
+    has_photo_observation: bool = False
+
+
+class TravelMemoryPhotoEvidence(CamelModel):
+    trip_id: str
+    asset_id: str
+    image_url: str
 
 
 class TravelMemoryPattern(CamelModel):
@@ -462,6 +579,8 @@ class TravelMemoryPattern(CamelModel):
     source_kind: Literal["photos", "plans", "combined"]
     support_count: int = 1
     source_trip_ids: list[str] = Field(default_factory=list)
+    photo_source_trip_ids: list[str] = Field(default_factory=list)
+    source_photos: list[TravelMemoryPhotoEvidence] = Field(default_factory=list)
     source_labels: list[str] = Field(default_factory=list)
     confirmable: bool = False
     confirmed: bool = False

@@ -7,6 +7,8 @@ The historical module name is retained for internal imports only.
 from __future__ import annotations
 
 import logging
+import base64
+import io
 import random
 import time
 import uuid
@@ -20,8 +22,11 @@ from app.ai.model_selection import DEFAULT_PLANNING_MODEL, PlanningModel
 
 logger = logging.getLogger("lvyousuotu")
 
-# Seed-2.1-turbo always uses medium thinking, without Ark hosted tools/Harness.
-_ARK_REASONING_EFFORT = "medium"
+# Seed-Evolving uses high thinking, without Ark hosted tools/Harness.
+_ARK_REASONING_EFFORT = "high"
+_ARK_IMAGE_DETAIL = "high"
+_ARK_IMAGE_MAX_PIXELS = 2_257_920
+_ARK_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 _ARK_THINKING_EXTRA_BODY: dict[str, Any] = {"thinking": {"type": "enabled"}}
 _DEEPSEEK_REASONING_EFFORT = "high"
 _DEEPSEEK_THINKING_EXTRA_BODY: dict[str, Any] = {
@@ -53,7 +58,7 @@ def _resolve_runtime(planning_model: PlanningModel | None = None) -> ChatRuntime
         return ChatRuntime(
             planning_model=None,
             provider="ark",
-            api_model=settings.ARK_CHAT_MODEL,
+            api_model=settings.ARK_CHAT_MODEL.lower(),
             api_key=settings.ARK_PLAN_API_KEY,
             base_url=settings.ARK_PLAN_BASE_URL,
             reasoning_effort=_ARK_REASONING_EFFORT,
@@ -105,7 +110,6 @@ def _get_client(runtime: ChatRuntime):  # noqa: ANN202
 
 # Structured task identifiers used in model logs and dispatch.
 TASK_PHOTO_ANALYZE = "photo_analyze"
-TASK_POSTCARD_SELECTION = "postcard_selection"
 TASK_POSTCARD_CREATIVE = "postcard_creative"
 TASK_POSTCARD_CRITIC = "postcard_critic"
 TASK_REPORT_DRAFT = "report_draft"
@@ -438,11 +442,61 @@ def _build_messages(
     if image_data_urls:
         content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
         for url in image_data_urls:
-            content.append({"type": "image_url", "image_url": {"url": url}})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": _prepare_ark_image(url), "detail": _ARK_IMAGE_DETAIL},
+            })
         messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": user_text})
     return messages
+
+
+def _prepare_ark_image(data_url: str) -> str:
+    """Bound image pixels and encoded bytes for high-detail understanding only.
+
+    The original data URL is still used by image generation and is never
+    modified or persisted here.
+    """
+    from PIL import Image
+
+    try:
+        header, payload = data_url.split(",", 1)
+        if header not in {
+            "data:image/jpeg;base64", "data:image/png;base64", "data:image/webp;base64"
+        }:
+            raise ValueError("unsupported image data URL")
+        raw = base64.b64decode(payload, validate=True)
+        if len(raw) > settings.GENERATED_IMAGE_MAX_BYTES:
+            raise ValueError("image input is too large")
+        with Image.open(io.BytesIO(raw)) as opened:
+            opened.load()
+            if opened.width * opened.height > settings.GENERATED_IMAGE_MAX_PIXELS:
+                raise ValueError("image has too many pixels")
+            if opened.width * opened.height <= _ARK_IMAGE_MAX_PIXELS and len(raw) <= _ARK_IMAGE_MAX_BYTES:
+                return data_url
+            image = opened.copy()
+        if image.width * image.height > _ARK_IMAGE_MAX_PIXELS:
+            scale = (_ARK_IMAGE_MAX_PIXELS / (image.width * image.height)) ** 0.5
+            image = image.resize(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        if image.mode not in {"RGB", "L"}:
+            if "A" in image.getbands():
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+        for quality in (85, 75, 65):
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            if buffer.tell() <= _ARK_IMAGE_MAX_BYTES:
+                return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    except (OSError, ValueError, TypeError) as exc:
+        raise AIGenerationError("AI 生成失败：照片无法安全发送给图片理解模型") from exc
+    raise AIGenerationError("AI 生成失败：照片压缩后仍超过图片理解模型限制")
 
 
 def _real_chat_json(

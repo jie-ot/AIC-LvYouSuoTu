@@ -24,6 +24,8 @@ __all__ = [
     "PostcardPlanResult",
     "PostcardCritiqueResult",
     "ReportCopyResult",
+    "ReportNextStopCopy",
+    "ReportStatNote",
     "ReportChartPoint",
     "ReportDraftResult",
     "MemoryUpdateResult",
@@ -53,6 +55,7 @@ class PhotoAnalysisItem(BaseModel):
             "other",
         ]
     ] = Field(default_factory=list)
+    shot_scale: Literal["wide", "medium", "close"] | None = None
     analysis_confidence: float = Field(default=0.5, ge=0, le=1)
 
 
@@ -72,7 +75,7 @@ class PostcardSelectionResult(BaseModel):
 
 
 class PostcardTypeStyle(BaseModel):
-    """Executable local typography tokens chosen by the creative director."""
+    """Typography direction passed to the image model."""
 
     family: Literal[
         "modern_sans",
@@ -100,7 +103,7 @@ class PostcardTypeStyle(BaseModel):
         "translucent",
         "paper_cutout",
     ] = "solid"
-    scale: Literal["restrained", "balanced", "bold", "hero"] = "balanced"
+    scale: Literal["review_reduced", "restrained", "balanced", "bold", "hero"] = "balanced"
     color_role: Literal[
         "auto_contrast",
         "source_dark",
@@ -157,7 +160,7 @@ class PostcardPlanItem(BaseModel):
     title_placement: Literal[
         "top_left", "top_right", "bottom_left", "bottom_right"
     ] = "bottom_left"
-    text_rendering: Literal["local_exact", "model_integrated"] = "local_exact"
+    text_rendering: Literal["model_integrated"] = "model_integrated"
     title: str
     source_asset_ids: list[str]
     extra_texts: list[str] = Field(default_factory=list)
@@ -182,6 +185,17 @@ class PostcardCritiqueResult(BaseModel):
     typography_score: int = Field(ge=0, le=10)
     finish_score: int = Field(ge=0, le=10)
     template_risk_score: int = Field(ge=0, le=10)
+    blocking_issues: list[Literal[
+        "subject_changed",
+        "location_fabricated",
+        "subject_occluded",
+        "text_illegible",
+        "text_cropped",
+        "text_duplicated",
+        "random_text_or_logo",
+        "severe_artifact",
+        "unsafe_content",
+    ]] = Field(default_factory=list, max_length=5)
     issues: list[str] = Field(default_factory=list, max_length=5)
     repair_target: Literal["none", "image", "typography", "both"] = "none"
     repair_instruction: str = Field(default="", max_length=300)
@@ -194,16 +208,29 @@ class PostcardCritiqueResult(BaseModel):
     ] = "none"
 
 
-class ReportCopyResult(BaseModel):
-    """Small editorial copy layer applied over the deterministic report facts."""
+class ReportStatNote(BaseModel):
+    id: str
+    caption: str = Field(min_length=3, max_length=20)
 
-    archetype_name: str = Field(min_length=4, max_length=7)
-    slogan: str = Field(min_length=10, max_length=28)
-    portrait: str = Field(min_length=45, max_length=100)
-    moment_line: str = Field(min_length=12, max_length=34)
-    souvenir_line: str = Field(min_length=10, max_length=26)
-    continue_title: str = Field(min_length=4, max_length=9)
-    contrast_title: str = Field(min_length=4, max_length=9)
+
+class ReportNextStopCopy(BaseModel):
+    title: str = Field(min_length=2, max_length=10)
+    destination: str = Field(min_length=2, max_length=10)
+    reason: str = Field(min_length=4, max_length=26)
+
+
+class ReportCopyResult(BaseModel):
+    """Editorial layer over the computed 旅格; every field is validated separately."""
+
+    journey_title: str = Field(min_length=3, max_length=14)
+    tagline: str = Field(min_length=6, max_length=26)
+    portrait: str = Field(min_length=24, max_length=90)
+    trip_word: str = Field(min_length=1, max_length=1)
+    trip_word_note: str = Field(min_length=3, max_length=18)
+    stat_notes: list[ReportStatNote] = Field(default_factory=list, max_length=3)
+    moment_line: str = Field(min_length=6, max_length=30)
+    next_continue: ReportNextStopCopy
+    next_contrast: ReportNextStopCopy
 
 
 class ReportDraftResult(BaseModel):

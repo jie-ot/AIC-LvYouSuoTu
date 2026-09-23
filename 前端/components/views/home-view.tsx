@@ -52,7 +52,9 @@ export function HomeView() {
                 </div>
                 <div className="trip-card-body">
                   <h2>{trip.title}</h2>
-                  <p><CalendarDays size={14} aria-hidden />{trip.dateLabel || "日期待定"}</p>
+                  {trip.dateLabel && trip.dateLabel !== "日期待定"
+                    ? <p><CalendarDays size={14} aria-hidden />{trip.dateLabel}</p>
+                    : null}
                   <div className="trip-counts" aria-label="旅行内容">
                     <span><Route size={14} aria-hidden />行程 {trip.planCount}</span>
                     <span><Camera size={14} aria-hidden />明信片 {trip.postcardCount}</span>

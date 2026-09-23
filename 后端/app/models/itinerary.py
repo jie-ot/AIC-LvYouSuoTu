@@ -8,9 +8,11 @@ schemas and embedded inside the `Plan` DTO.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.ai.model_selection import PlanningModel
 
 
 class TripInfo(BaseModel):
@@ -59,7 +61,7 @@ class Schedule(BaseModel):
     transport_mode: Literal["driving", "transit", "walking", "bicycling"] | None = None
     tags: list[str] = Field(default_factory=list)
     booking_required: bool = False
-    fact_status: Literal["verified", "reference", "unverified"] | None = None
+    fact_status: Literal["verified", "unverified"] | None = None
     fact_refs: list[str] = Field(default_factory=list)
     action: ScheduleAction | None = None
     # DeepSeek-only semantic hints. The backend validates these before it builds
@@ -133,6 +135,53 @@ class ExperienceSummary(BaseModel):
     )
 
 
+class PlanningMemoryPhoto(BaseModel):
+    trip_id: str
+    asset_id: str
+    image_url: str
+
+
+class PlanningMemoryItem(BaseModel):
+    """A saved, enabled memory actually supplied to this planning request."""
+
+    id: str
+    text: str
+    category: str = "other"
+    source_kind: str = "manual"
+    source_pattern_id: str | None = None
+    source_trip_id: str | None = None
+    source_trip_title: str | None = None
+    source_trip_ids: list[str] = Field(default_factory=list)
+    source_photos: list[PlanningMemoryPhoto] = Field(default_factory=list)
+    relevance_score: int = 0
+
+
+class PlanningMemoryContext(BaseModel):
+    enabled: bool = False
+    selected: list[PlanningMemoryItem] = Field(default_factory=list)
+    skipped_count: int = 0
+    excluded_ids: list[str] = Field(default_factory=list)
+
+
+class PlanningMemoryBasis(BaseModel):
+    """A checkable text or controlled-scene match, not causal attribution."""
+
+    memory_id: str
+    schedule_id: str
+    matched_term: str
+    match_kind: Literal["literal", "scene"] = "literal"
+    schedule_excerpt: str
+    fact_refs: list[str] = Field(default_factory=list)
+
+
+class PlanningRequestSnapshot(BaseModel):
+    """Saved requirement record for a fresh confirmed plan, not a credential."""
+
+    brief: dict[str, Any]
+    confirmation_token: str
+    planning_model: PlanningModel
+
+
 class ItineraryData(BaseModel):
     trip_info: TripInfo
     preparations: list[Preparation]
@@ -145,6 +194,11 @@ class ItineraryData(BaseModel):
     # to carry a caveat, and shipping them silently is how a plan that contradicts
     # the request reaches the traveller looking fully verified.
     advisories: list[str] = Field(default_factory=list)
+    # The backend fills these after itinerary validation. Model-provided values
+    # are replaced and never treated as evidence of memory use.
+    memory_context: PlanningMemoryContext | None = None
+    memory_basis: list[PlanningMemoryBasis] = Field(default_factory=list)
+    planning_snapshot: PlanningRequestSnapshot | None = None
 
     @field_validator("bookings", mode="after")
     @classmethod

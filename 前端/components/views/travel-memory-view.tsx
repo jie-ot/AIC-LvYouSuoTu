@@ -21,6 +21,7 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import {
   confirmTravelMemoryPattern,
   createTravelMemoryItem,
+  deleteTravelPhotoObservation,
   deleteTravelMemoryItem,
   getTravelMemory,
   patchTravelMemoryItem,
@@ -31,6 +32,7 @@ import type {
   TravelMemoryDescription,
   TravelMemoryDisplay,
   TravelMemoryPattern,
+  TravelMemoryFootprint,
 } from "@/types"
 
 const CATEGORIES = [
@@ -57,6 +59,7 @@ export function TravelMemoryView() {
   const [category, setCategory] = useState("hotel")
   const [editing, setEditing] = useState<TravelMemoryDescription | null>(null)
   const [pendingDelete, setPendingDelete] = useState<TravelMemoryDescription | null>(null)
+  const [pendingObservationDelete, setPendingObservationDelete] = useState<TravelMemoryFootprint | null>(null)
   const [editText, setEditText] = useState("")
   const [editCategory, setEditCategory] = useState("other")
 
@@ -84,14 +87,16 @@ export function TravelMemoryView() {
     return () => { active = false }
   }, [toastError])
 
-  async function update(key: string, action: () => Promise<TravelMemoryDisplay>, message?: string) {
-    if (!memory || busy) return
+  async function update(key: string, action: () => Promise<TravelMemoryDisplay>, message?: string): Promise<boolean> {
+    if (!memory || busy) return false
     setBusy(key)
     try {
       setMemory(await action())
       if (message) toast(message, "success")
+      return true
     } catch (error) {
       toastError(error)
+      return false
     } finally {
       setBusy(null)
     }
@@ -130,11 +135,8 @@ export function TravelMemoryView() {
                 <div className="memory-section-title"><h2>旅行足迹</h2><span>{footprints.length}</span></div>
                 <div className="memory-footprint-grid">
                   {visibleFootprints.map((item) => (
-                    <Link
-                      key={item.id}
-                      href={`/trips/detail?tripId=${encodeURIComponent(item.tripId)}&from=memory`}
-                      className="memory-footprint-card"
-                    >
+                    <article key={item.id} className="memory-footprint-card">
+                    <Link className="memory-footprint-open" href={`/trips/detail?tripId=${encodeURIComponent(item.tripId)}&from=memory`}>
                       {item.coverImage ? (
                         <img src={resolveAssetUrl(item.coverImage)} alt="" onError={handleImageError} />
                       ) : (
@@ -142,7 +144,7 @@ export function TravelMemoryView() {
                       )}
                       <div className="memory-footprint-copy">
                         <div className="memory-footprint-heading"><strong>{item.title}</strong><span>{item.stateLabel}</span></div>
-                        <p>{item.dateLabel || "日期待补"}</p>
+                        {item.dateLabel ? <p>{item.dateLabel}</p> : null}
                         {item.travelTypes.length ? (
                           <div className="memory-tags">{item.travelTypes.map((tag) => <span key={tag}>{tag}</span>)}</div>
                         ) : null}
@@ -151,6 +153,8 @@ export function TravelMemoryView() {
                         <div className="memory-source-line">{item.sourceLabels.join(" · ")}<ChevronRight size={16} aria-hidden /></div>
                       </div>
                     </Link>
+                    {item.hasPhotoObservation ? <button type="button" className="memory-observation-delete" disabled={busy !== null} onClick={() => setPendingObservationDelete(item)}>清除这次旅行的照片线索</button> : null}
+                    </article>
                   ))}
                 </div>
                 {footprints.length > 4 ? (
@@ -164,7 +168,8 @@ export function TravelMemoryView() {
 
             {patterns.length ? (
               <section className="memory-section">
-                <div className="memory-section-title"><h2>正在形成</h2><span>{patterns.length}</span></div>
+                <div className="memory-section-title"><h2>旅行线索，等你判断</h2><span>{patterns.length}</span></div>
+                <p className="memory-pattern-explain">照片记录了出现过的场景，旧规划记录了原先的安排；两者都不能证明你喜欢。确认后才会作为后续规划偏好，你可以停用或删除。</p>
                 <div className="memory-pattern-list">
                   {patterns.map((item) => (
                     <PatternRow
@@ -268,7 +273,7 @@ export function TravelMemoryView() {
               "create",
               () => createTravelMemoryItem({ text: value, category, expectedVersion: memory.version }),
               "已添加",
-            ).then(() => { setAdding(false); setText("") })
+            ).then((ok) => { if (ok) { setAdding(false); setText("") } })
           }}
         />
       ) : null}
@@ -293,7 +298,7 @@ export function TravelMemoryView() {
                 expectedVersion: memory.version,
               }),
               "已更新",
-            ).then(() => setEditing(null))
+            ).then((ok) => { if (ok) setEditing(null) })
           }}
         />
       ) : null}
@@ -314,10 +319,30 @@ export function TravelMemoryView() {
                 item.id,
                 () => deleteTravelMemoryItem(item.id, memory.version),
                 "已删除",
-              ).then(() => setPendingDelete(null))
+              ).then((ok) => { if (ok) setPendingDelete(null) })
             },
           },
           { label: "取消", variant: "ghost", onClick: () => setPendingDelete(null) },
+        ]}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingObservationDelete)}
+        title="清除这次旅行的照片线索？"
+        description="只清除旅行记忆中的照片观察。原始照片、明信片和旅行记录仍保留；依赖这些线索确认的偏好也会移除。"
+        onClose={() => setPendingObservationDelete(null)}
+        actions={[
+          {
+            label: busy === pendingObservationDelete?.tripId ? "清除中…" : "清除线索",
+            variant: "danger",
+            onClick: () => {
+              if (!pendingObservationDelete || !memory) return
+              const tripId = pendingObservationDelete.tripId
+              void update(tripId, () => deleteTravelPhotoObservation(tripId, memory.version), "照片线索已清除")
+                .then((ok) => { if (ok) setPendingObservationDelete(null) })
+            },
+          },
+          { label: "取消", variant: "ghost", onClick: () => setPendingObservationDelete(null) },
         ]}
       />
 
@@ -343,9 +368,15 @@ function PatternRow({ item, busy, onConfirm }: {
         <strong>{item.title}</strong>
         <p>{item.content}</p>
         <div className="memory-pattern-sources">{item.sourceLabels.map((label) => <span key={label}>{label}</span>)}</div>
+        {item.sourcePhotos?.length ? <div className="memory-pattern-photos" aria-label="支持这条线索的照片">
+          {item.sourcePhotos.slice(0, 4).map((photo) => <a key={photo.assetId} href={resolveAssetUrl(photo.imageUrl)} target="_blank" rel="noreferrer" aria-label="查看来源照片">
+            <img src={resolveAssetUrl(photo.imageUrl)} alt="来源旅行照片" onError={handleImageError} />
+          </a>)}
+          {item.sourcePhotos.length > 4 ? <span>另有 {item.sourcePhotos.length - 4} 张</span> : null}
+        </div> : null}
       </div>
       {item.confirmable ? (
-        <button type="button" onClick={onConfirm} disabled={busy}>{busy ? "保存中…" : "用于规划"}</button>
+        <button type="button" onClick={onConfirm} disabled={busy}>{busy ? "保存中…" : "确认下次也想体验"}</button>
       ) : null}
     </article>
   )

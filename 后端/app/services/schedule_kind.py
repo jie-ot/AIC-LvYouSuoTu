@@ -21,6 +21,7 @@ ATTRACTION_TAGS = frozenset(
     {
         "历史",
         "文化",
+        "人文",
         "景区",
         "风景",
         "自然",
@@ -84,15 +85,15 @@ def classify_schedule(
 
     # Tags beat POI types and name heuristics. A hotel checkout whose activity
     # mentions 机场 must stay hotel; an airport fact_ref must not override 住宿.
-    if tags & TRANSPORT_TAGS:
+    if _tags_match(tags, TRANSPORT_TAGS):
         return "transport"
-    if tags & HOTEL_TAGS:
+    if _tags_match(tags, HOTEL_TAGS):
         return "hotel"
-    if tags & ATTRACTION_TAGS or _is_walking_street(text):
+    if _tags_match(tags, ATTRACTION_TAGS) or _is_walking_street(text):
         return "attraction"
-    if tags & DINING_TAGS:
+    if _tags_match(tags, DINING_TAGS):
         return "dining"
-    if tags & SHOPPING_TAGS:
+    if _tags_match(tags, SHOPPING_TAGS):
         return "shopping"
 
     poi_kind = _kind_from_poi(fact, text)
@@ -164,3 +165,8 @@ def _is_walking_street(text: str) -> bool:
 
 def _has_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
+
+
+def _tags_match(tags: set[str], vocabulary: frozenset[str]) -> bool:
+    """Accept model composite tags such as `历史文化` and `边境风光`."""
+    return any(token in tag for tag in tags for token in vocabulary)

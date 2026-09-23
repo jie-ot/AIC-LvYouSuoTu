@@ -12,7 +12,7 @@ import { ArrowRight, Compass } from "lucide-react";
 export function HistoryDetailView() {
   const [exportTarget, setExportTarget] = useState<HTMLDivElement | null>(null);
   const searchParams = useSearchParams();
-  const { plans } = useApp();
+  const { plans, beginEditPlan, navigate } = useApp();
   const plan = plans.find((p) => p.id === searchParams.get("planId"));
   const sourceTripId = searchParams.get("tripId");
   const backHref = searchParams.get("from") === "trip" && sourceTripId
@@ -48,6 +48,13 @@ export function HistoryDetailView() {
       <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
         {plan.tripId ? <div className="detail-trip-link">
           <Link href={`/trips/detail?tripId=${encodeURIComponent(plan.tripId)}&from=history&sourceId=${encodeURIComponent(plan.id)}`}>查看这次旅行<ArrowRight size={15} /></Link>
+        </div> : null}
+        {plan.itineraryData.planning_snapshot && (plan.itineraryData.memory_context?.selected.length ?? 0) > 0 ? <div className="planning-memory-compare">
+          <p>这份行程保存了当时的确认需求。核对后可重新规划对照，原行程不会被覆盖。</p>
+          <button type="button" onClick={() => {
+            beginEditPlan(plan);
+            navigate({ page: "planning", planId: plan.id });
+          }}>按保存时需求核对并对照</button>
         </div> : null}
         <ItineraryDetail
           data={plan.itineraryData}

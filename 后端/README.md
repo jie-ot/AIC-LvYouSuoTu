@@ -30,10 +30,9 @@ Copy-Item .env.example .env
 
 然后在 `.env` 中填写实际 API Key。主要配置包括：
 
-- `ARK_PLAN_API_KEY`：照片理解、报告、明信片创意等文本任务
-- `ARK_IMAGE_API_KEY`：Seedream 图片生成
+- `ARK_PLAN_API_KEY`：照片理解、报告、明信片创意及 Seedream 明信片生成（Agent Plan 专属 Key）
 - `DEEPSEEK_API_KEY`：旅行规划
-- `AMAP_API_KEY`、`QWEATHER_API_KEY`、`VARIFLIGHT_API_KEY`：对应旅行信息工具（按需填写）
+- `AMAP_API_KEY`、`VARIFLIGHT_API_KEY`：对应旅行信息工具（按需填写）
 - `FRONTEND_ORIGINS`：允许访问后端的前端地址；手机访问时追加 `http://电脑局域网IP:3000`
 
 真实 `.env` 只保存在本机，不要提交到 Git；`.env.example` 只用于说明配置项。

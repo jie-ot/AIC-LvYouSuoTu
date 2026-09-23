@@ -60,6 +60,10 @@ export interface PlanWithAIInput {
   messages?: PlanningChatMessage[]
   brief?: PlanningBrief | null
   confirmed?: boolean
+  /** Use confirmed travel memories for this planning request only. */
+  useMemory?: boolean
+  /** IDs excluded from this one run; saved memories stay intact. */
+  excludedMemoryIds?: string[]
   /** Must match the latest server-authored confirmation checklist. */
   confirmationToken?: string | null
   /** 客户端生成的进度令牌；带上后可用 getPlanningProgress 轮询真实阶段。 */
@@ -119,6 +123,7 @@ export interface TravelApi {
   createTravelMemoryItem(input: { text: string; category: string; expectedVersion: number }): Promise<TravelMemoryDisplay>
   patchTravelMemoryItem(id: string, input: { text?: string; category?: string; enabled?: boolean; confirm?: boolean; expectedVersion: number }): Promise<TravelMemoryDisplay>
   deleteTravelMemoryItem(id: string, expectedVersion: number): Promise<TravelMemoryDisplay>
+  deleteTravelPhotoObservation(tripId: string, expectedVersion: number): Promise<TravelMemoryDisplay>
   updateTravelMemorySettings(input: { enabled: boolean; expectedVersion: number }): Promise<TravelMemoryDisplay>
   confirmTravelMemoryPattern(id: string, expectedVersion: number): Promise<TravelMemoryDisplay>
 
@@ -193,6 +198,10 @@ export function patchTravelMemoryItem(id: string, input: { text?: string; catego
 }
 export function deleteTravelMemoryItem(id: string, expectedVersion: number): Promise<TravelMemoryDisplay> {
   return realApi.deleteTravelMemoryItem(id, expectedVersion)
+}
+
+export function deleteTravelPhotoObservation(tripId: string, expectedVersion: number): Promise<TravelMemoryDisplay> {
+  return realApi.deleteTravelPhotoObservation(tripId, expectedVersion)
 }
 export function updateTravelMemorySettings(input: { enabled: boolean; expectedVersion: number }): Promise<TravelMemoryDisplay> {
   return realApi.updateTravelMemorySettings(input)

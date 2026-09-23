@@ -10,7 +10,6 @@ import json
 from typing import Any
 
 from app.ai.schemas import PhotoAnalysisResult, PostcardSelectionResult
-from app.models.dto import TravelProfileData
 from app.models.itinerary import ItineraryData
 
 
@@ -26,7 +25,7 @@ def build_planning_user_text(
     parts.append(f"【用户已保存的旅行记忆】\n{memory_summary}")
     parts.append(f"【累计用户需求（含本轮新增要求）】\n{message}")
     if context is not None:
-        compact_context = context.model_dump()
+        compact_context = context.model_dump(exclude={"memory_context", "memory_basis", "planning_snapshot"})
         for day in compact_context.get("itinerary", []):
             day.pop("daily_maps", None)
         parts.append(
@@ -36,119 +35,23 @@ def build_planning_user_text(
     else:
         parts.append("【当前完整行程 context】\nnull（首轮，请新建完整行程）")
     if fact_pack is not None:
-        rails = fact_pack.get("rails") or []
-        if rails:
-            rail_rule = (
-                "仅当 Function Calling 返回 rails 且 status=ok 时：可在 bookings 中引用其参考车次、"
-                "时刻、参考票价，但每条都必须显式附“以 12306 官方实时为准，票价余票请"
-                "官方渠道确认”；严禁超出工具字段编造其它车次。"
-            )
-        else:
-            rail_rule = (
-                "事实包 rails 为空是正常状态：严禁出现任何具体车次、票价、余票；"
-                "如需要火车事实，必须主动调用 query_rail_tickets，否则只能写“建议在"
-                " 12306 官方 App 查询并尽早购票/候补”。"
-            )
         parts.append(
             "【受控事实包 TravelFactPack】\n"
-            "事实数组为空是正常状态，不代表目的地没有相关信息或已经完成查询。所有 A 类高德事实（天气、POI、路线）"
-            "与 A′ 火车/机票参考事实，必须由 Function Calling 工具返回后才能写入行程；"
-            "不得把空事实包当作已完成查询，也不得编造实时事实。\n"
-            + rail_rule
-            + "\n"
+            "事实数组为空是正常状态，不代表目的地没有相关信息或已经完成查询。"
+            "只有 status=ok 的 Function Calling 返回才能作为事实写入行程；"
+            "所有成功返回的工具事实采用同一可信规则，不再划分来源等级。"
+            "没有工具结果时不得编造班次、票价、余票、天气、地点或路线数据。\n"
             + json.dumps(fact_pack, ensure_ascii=False)
         )
     return "\n\n".join(parts)
 
 
-def build_generate_user_text(*, requirements: str, memory_summary: str) -> str:
-    """Compose user text for postcard/report generation tasks."""
-    del memory_summary
-    return f"【本次制作要求】\n{requirements}"
-
-
-def build_report_draft_user_text(
-    *,
-    analysis: PhotoAnalysisResult,
-    requirements: str,
-    memory_summary: str,
-) -> str:
-    """Compose user text for report draft generation.
-
-    Passes the full ``PhotoAnalysisResult`` from the photo understanding step
-    unchanged so the report model can ground its output in per-photo semantics.
-    """
-    del memory_summary
+def build_report_copy_user_text(*, brief: dict[str, Any], requirements: str) -> str:
+    """Give the copy editor the computed 旅格 and the only facts it may cite."""
     return (
-        f"【本次制作要求】\n{requirements}\n\n"
-        "【照片理解结果 PhotoAnalysisResult（上游照片理解任务的完整 JSON 输出，"
-        "请据此撰写报告；勿臆造其中未出现的画面细节）】\n"
-        + json.dumps(analysis.model_dump(), ensure_ascii=False)
-    )
-
-
-def build_report_copy_user_text(
-    *,
-    analysis: PhotoAnalysisResult,
-    base_profile: TravelProfileData,
-    requirements: str,
-) -> str:
-    """Give the copy editor facts plus the backend-computed profile shell."""
-    photo_facts = {
-        "photos": [
-            {
-                "asset_id": photo.asset_id,
-                "scene_summary": photo.scene_summary,
-                "observed_facts": photo.observed_facts,
-                "scene_tags": photo.scene_tags,
-            }
-            for photo in analysis.photos
-            if photo.suitability != "unsuitable"
-        ],
-        "overall_location": analysis.overall_location,
-        "start_date": analysis.start_date,
-        "end_date": analysis.end_date,
-    }
-    profile_shell = {
-        "archetype_id": base_profile.archetype_id,
-        "archetype_name": base_profile.archetype_name,
-        "persona_code": base_profile.persona_code,
-        "scene_signature": base_profile.scene_signature.model_dump(by_alias=True),
-        "sample_quality": base_profile.sample_quality,
-        "scope_note": base_profile.scope_note,
-        "journey_count": base_profile.journey_count,
-        "profile_stage": base_profile.profile_stage,
-        "returning_motifs": base_profile.returning_motifs,
-        "new_facets": base_profile.new_facets,
-        "next_trip_experiments": [
-            item.model_dump(by_alias=True) for item in base_profile.next_trip_experiments[:2]
-        ],
-    }
-    return (
-        f"【本次制作要求】\n{requirements or '未填写'}\n\n"
-        "【照片理解结果（只能使用这里已有的画面事实）】\n"
-        + json.dumps(photo_facts, ensure_ascii=False)
-        + "\n\n【后端基础档案（分数、阶段、累计次数和母题不可改写）】\n"
-        + json.dumps(profile_shell, ensure_ascii=False)
-    )
-
-
-def build_postcard_selection_user_text(
-    *, analysis: PhotoAnalysisResult, requirements: str, memory_summary: str
-) -> str:
-    """Compose the text-only input for postcard count and source selection.
-
-    Passes the full ``PhotoAnalysisResult`` from the photo understanding step
-    (after backend suitability pre-filter) so the model can select only valid
-    ``source_asset_ids``. Creative work intentionally happens in a later turn
-    that receives the selected original images.
-    """
-    del memory_summary
-    return (
-        f"【本次制作要求】\n{requirements}\n\n"
-        "【照片理解结果 PhotoAnalysisResult（上游照片理解任务的完整 JSON 输出；"
-        "source_asset_ids 只能从其中 photos[].asset_id 选取，严禁臆造）】\n"
-        + json.dumps(analysis.model_dump(), ensure_ascii=False)
+        f"【用户对这一程的描述与要求】\n{requirements or '（用户没有填写）'}\n\n"
+        "【后端算好的旅格与事实（数值与类型名不可改写）】\n"
+        + json.dumps(brief, ensure_ascii=False)
     )
 
 
@@ -210,10 +113,16 @@ def build_photo_analysis_user_text(
         "请在输出的 photos[] 中，对每张照片使用下面给定的 asset_id（严禁臆造其它 ID）：",
     ]
     for idx, meta in enumerate(photo_metas, start=1):
-        taken = meta.get("taken_at") or "未知"
-        loc = meta.get("location") or "未知"
+        taken = meta.get("taken_at") or "未提供"
+        if meta.get("place"):
+            loc = f"{meta['place']}（GPS 逆地理）"
+        elif meta.get("location"):
+            loc = f"{meta['location']}（坐标未解析出地名，可结合画面推断城市）"
+        else:
+            loc = "未提供"
         lines.append(
-            f"{idx}. asset_id={meta.get('asset_id')}，拍摄时间={taken}，地点={loc}"
+            f"{idx}. asset_id={meta.get('asset_id')}，相机当地拍摄时间={taken}，"
+            f"拍摄地点={loc}"
         )
     manifest = "\n".join(lines)
     parts = [f"【本次生成需求】\n{requirements}"]

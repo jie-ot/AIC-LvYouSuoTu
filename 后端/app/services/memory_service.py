@@ -16,6 +16,7 @@ from app.core.exceptions import InvalidParamError
 from app.models.base import utcnow
 from app.models.user_memory import UserMemory
 from app.models.user_memory_event import UserMemoryEvent
+from app.models.trip import Trip
 from app.services import id_service
 
 INITIAL_MEMORY_TEXT = "暂无旅行记忆。"
@@ -211,7 +212,7 @@ def get_or_create_current_memory(session: Session, user_id: str) -> UserMemory:
 
 NEGATIVE_SIGNAL = (
     r"(?:不(?:太|怎么)?喜欢|不爱|讨厌|不想去|不想看|不想吃|不想要|不希望|"
-    r"不要|不是|不去|不看|不吃|别选|别用|别去|别看|别吃|避开|排除|拒绝|禁止)"
+    r"不要|不是|不去|不看|不吃|别选|别用|别去|别看|别吃|避免|避开|排除|拒绝|禁止)"
 )
 PREFERENCE_CLAUSE_BOUNDARY = re.compile(
     r"(?:[\n，。；;]+|但是|不过|然而|反而|而是|但|却)"
@@ -689,6 +690,7 @@ def record_trip_observation(
     capture_minutes_by_date: dict[str, list[int]] = {}
     scene_tags: set[str] = set()
     observed_facts: list[str] = []
+    scene_evidence: dict[str, list[dict[str, str]]] = {}
     useful_count = 0
     for item in getattr(analysis, "photos", []):
         if getattr(item, "suitability", "usable") == "unsuitable":
@@ -714,7 +716,17 @@ def record_trip_observation(
         if guessed_location and guessed_location not in {"未知地点", "未知目的地"}:
             locations.add(guessed_location)
             location_labels.add(guessed_location)
-        scene_tags.update(str(tag) for tag in getattr(item, "scene_tags", []) if tag)
+        for raw_tag in getattr(item, "scene_tags", []):
+            tag = str(raw_tag or "").strip()
+            if not tag:
+                continue
+            scene_tags.add(tag)
+            asset_id = str(getattr(item, "asset_id", "") or "").strip()
+            image_url = str(getattr(source, "image_url", "") or "").strip()
+            if asset_id and image_url.startswith("/static/uploads/"):
+                evidence = scene_evidence.setdefault(tag, [])
+                if not any(row["asset_id"] == asset_id for row in evidence):
+                    evidence.append({"asset_id": asset_id, "image_url": image_url})
         for fact in getattr(item, "observed_facts", []):
             clean = " ".join(str(fact or "").strip().split())
             if clean and clean not in observed_facts:
@@ -724,6 +736,16 @@ def record_trip_observation(
     observations = deepcopy(mem_json.get("trip_observations", {}))
     if not isinstance(observations, dict):
         observations = {}
+    # A replacement snapshot may describe different scenes or photos. Any
+    # confirmed pattern citing the old photo evidence must be reconfirmed.
+    old_snapshot_replaced = trip_id in observations
+    items = [deepcopy(item) for item in mem_json.get("items", []) if isinstance(item, dict)]
+    invalidated_ids = [
+        str(item.get("id")) for item in items
+        if old_snapshot_replaced and _depends_on_photo_observation(item, trip_id)
+    ]
+    if invalidated_ids:
+        mem_json["items"] = [item for item in items if not _depends_on_photo_observation(item, trip_id)]
     daily_spans = [
         max(values) - min(values)
         for values in capture_minutes_by_date.values()
@@ -742,6 +764,7 @@ def record_trip_observation(
         "capture_hours": sorted(hours),
         "longest_same_day_span_hours": round(longest_same_day_span, 1),
         "scene_tags": sorted(scene_tags),
+        "scene_evidence": {tag: rows[:8] for tag, rows in sorted(scene_evidence.items())},
         "observed_facts": observed_facts[:8],
         "updated_at": utcnow().isoformat(),
     }
@@ -760,6 +783,65 @@ def record_trip_observation(
             "photo_count": useful_count,
             "photo_day_count": snapshot["photo_day_count"],
             "scene_tags": snapshot["scene_tags"],
+            "invalidated_item_ids": invalidated_ids,
+        },
+        expected_version=memory.version,
+    )
+
+
+def _depends_on_photo_observation(item: dict, trip_id: str) -> bool:
+    if item.get("source_kind") != "observed_pattern":
+        return False
+    photo_ids = item.get("photo_source_trip_ids")
+    if isinstance(photo_ids, list):
+        return trip_id in photo_ids
+    # Older confirmed patterns lacked a split by evidence type. Never
+    # withdraw a known plan-only rule; otherwise err on the safe side.
+    if item.get("source_pattern_kind") == "plans":
+        return False
+    source_ids = item.get("source_trip_ids")
+    return isinstance(source_ids, list) and trip_id in source_ids
+
+
+def delete_trip_observation(
+    session: Session,
+    *,
+    user_id: str,
+    trip_id: str,
+    expected_version: int | None = None,
+) -> UserMemory:
+    """Withdraw one trip's photo-derived clues and dependent confirmed rules.
+
+    Source photos, generated artifacts, and manually entered preferences stay
+    intact. A confirmed pattern whose cited evidence included this trip must
+    be reconfirmed from the remaining evidence before planning can use it.
+    """
+    owned_trip = session.exec(select(Trip).where(Trip.id == trip_id, Trip.user_id == user_id)).first()
+    if owned_trip is None:
+        raise InvalidParamError("这趟旅行不存在")
+    memory = get_or_create_current_memory(session, user_id)
+    _check_version(memory, expected_version)
+    mem_json = _upgrade_to_v3(memory)
+    raw_observations = mem_json.get("trip_observations")
+    observations = deepcopy(raw_observations) if isinstance(raw_observations, dict) else {}
+    removed = observations.pop(trip_id, None)
+    items = [deepcopy(item) for item in mem_json.get("items", []) if isinstance(item, dict)]
+    invalidated_ids = [str(item.get("id")) for item in items if _depends_on_photo_observation(item, trip_id)]
+    if removed is None and not invalidated_ids:
+        return memory
+    mem_json["trip_observations"] = observations
+    mem_json["items"] = [item for item in items if not _depends_on_photo_observation(item, trip_id)]
+    return _cas_write(
+        session,
+        memory,
+        mem_json=mem_json,
+        source_type="manual",
+        source_id=f"remove-observation:{trip_id}:{memory.version}",
+        trip_id=trip_id,
+        delta={
+            "kind": "photo_observation_removed",
+            "trip_id": trip_id,
+            "invalidated_item_ids": invalidated_ids,
         },
         expected_version=memory.version,
     )
@@ -784,7 +866,7 @@ def confirm_observed_pattern(
     if any(str(item.get("source_pattern_id") or "") == pattern_id for item in items):
         return memory
     now = utcnow().isoformat()
-    item_id = _memory_item_id(planning_text)
+    item_id = f"memory_pattern_{hashlib.sha256(pattern_id.encode('utf-8')).hexdigest()[:12]}"
     items.append({
         "id": item_id,
         "text": planning_text,
@@ -792,8 +874,10 @@ def confirm_observed_pattern(
         "state": "saved",
         "enabled": True,
         "source_kind": "observed_pattern",
+        "source_pattern_kind": str(getattr(pattern, "source_kind", "") or ""),
         "source_pattern_id": pattern_id,
         "source_trip_ids": list(getattr(pattern, "source_trip_ids", []) or []),
+        "photo_source_trip_ids": list(getattr(pattern, "photo_source_trip_ids", []) or []),
         "source_trip_id": None,
         "source_trip_title": None,
         "created_at": now,

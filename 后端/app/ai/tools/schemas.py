@@ -1,9 +1,4 @@
-"""Tool-internal Schemas (《外部事实源与工具调用规范》四).
-
-These are model-internal structures, never replacing front/back-end DTOs. The
-`FactStatus` enum and the layering (A / A′ / B) must not be changed.
-`TravelFactPack` is the ONLY fact container the model ever sees.
-"""
+"""Tool-internal schemas used by the planning fact pipeline."""
 
 from __future__ import annotations
 
@@ -16,15 +11,13 @@ FactStatus = Literal[
     "unknown",
     "timeout",
     "provider_not_connected",
-    "needs_official_confirmation",
 ]
 
 
 class ToolCallResult(BaseModel):
     tool_name: str
-    provider: str  # amap / qweather / rail_query_mcp / entry_guide
+    provider: str
     status: FactStatus
-    degraded_to_b: bool = False  # A′ failed → degraded to its B entry guide
     latency_ms: int | None = None
     error_code: str | None = None
 
@@ -77,7 +70,7 @@ class RouteFact(BaseModel):  # amap_route
     alternatives: list[RouteAlternativeFact] = Field(default_factory=list)
 
 
-class WeatherFact(BaseModel):  # amap_weather / qweather_forecast
+class WeatherFact(BaseModel):  # amap_weather
     city: str
     date: str  # YYYY-MM-DD
     summary: str | None  # e.g. "多云 18-26℃"
@@ -119,34 +112,10 @@ class PoiFact(BaseModel):  # amap_poi_search / amap_geocode
     photo_url: str | None = None
 
 
-class BookingEvidence(BaseModel):  # B-class entry guide + A-class location facts
-    booking_type: str  # e.g. "火车票"、"机票"、"酒店"、"景区门票"
-    official_channel: str  # e.g. "12306 官方 App/网站"
-    query_hint: str  # e.g. "2026-07-10 大理→丽江 动车"
-    notes: str | None  # general notes (候补、提前预约等), no fabricated real-time data
-    status: FactStatus  # B-class is always needs_official_confirmation
-
-
-class RailFact(BaseModel):  # A′ rail_query_mcp (reference-level, non-authoritative)
-    origin: str
-    destination: str
-    date: str  # YYYY-MM-DD
-    train_no: str | None
-    depart_time: str | None
-    arrive_time: str | None
-    duration: str | None = None  # 历时, e.g. "05:53"
-    seat_class: str | None
-    ref_price: float | None
-    source: str = "community_mcp"
-    status: FactStatus  # even ok is reference-level; model must add "以官方为准"
-
-
-class TravelFactPack(BaseModel):  # the only fact container injected into the prompt
+class TravelFactPack(BaseModel):
     request_id: str
     generated_at: str  # ISO 8601
     routes: list[RouteFact] = []
     weather: list[WeatherFact] = []
     pois: list[PoiFact] = []
-    rails: list[RailFact] = []  # A′ rail reference facts (empty when degraded)
-    booking_evidences: list[BookingEvidence] = []
     tool_calls: list[ToolCallResult] = []

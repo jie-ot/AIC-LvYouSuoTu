@@ -1,9 +1,8 @@
-"""VariFlight Tripmatch Streamable HTTP MCP adapter.
+"""VariFlight TripMatch Streamable HTTP MCP adapter.
 
-Only the selected ``searchFlightandTrainTransferinfo`` capability is exposed
-here. Tripmatch returns candidate information; rail segment schedules and
-availability remain the responsibility of the existing 12306 MCP adapter. The
-separate Aviation MCP adapter reuses the transport helper in this module.
+The application uses its air-rail transfer, rail-ticket, and station-search
+tools. The separate Aviation adapter reuses the transport helper in this
+module.
 
 The API key is appended to the request URL only at call time.  Public return
 values and logs contain the endpoint host/path but never the key or signed URL.
@@ -29,7 +28,9 @@ from app.core.business_logging import log_event
 logger = logging.getLogger("lvyousuotu")
 
 PROVIDER = "variflight_tripmatch_mcp"
-TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER = "searchFlightandTrainTransferinfo"
+TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO = "getFlightAndTrainTransferInfo"
+TOOL_SEARCH_TRAIN_TICKETS = "searchTrainTickets"
+TOOL_SEARCH_TRAIN_STATIONS = "searchTrainStations"
 
 
 @dataclass(frozen=True)
@@ -78,13 +79,26 @@ def endpoint_identity() -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
-def search_flight_train_transfer_sync(
+def get_flight_train_transfer_info_sync(
     depcity: str, arrcity: str, depdate: str
 ) -> TripmatchCallResult:
     return _call_tool_sync(
-        TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
         {"depcity": depcity, "arrcity": arrcity, "depdate": depdate},
     )
+
+
+def search_train_tickets_sync(
+    from_city: str, to_city: str, date: str
+) -> TripmatchCallResult:
+    return _call_tool_sync(
+        TOOL_SEARCH_TRAIN_TICKETS,
+        {"from_city": from_city, "to_city": to_city, "date": date},
+    )
+
+
+def search_train_stations_sync(query: str) -> TripmatchCallResult:
+    return _call_tool_sync(TOOL_SEARCH_TRAIN_STATIONS, {"query": query})
 
 
 def _call_tool_sync(tool_name: str, arguments: dict[str, str]) -> TripmatchCallResult:

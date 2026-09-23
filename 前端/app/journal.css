@@ -917,6 +917,13 @@ a:active {
   cursor: pointer;
 }
 
+.memory-observation-note {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .memory-consent input {
   margin-top: 3px;
   accent-color: #0a6b78;
@@ -2302,6 +2309,111 @@ a:active {
   line-height: 1.9;
   margin: 10px 0 0;
 }
+.itinerary-memory-evidence {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+.itinerary-memory-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+.itinerary-memory-evidence > p,
+.itinerary-memory-list p {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.itinerary-memory-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.itinerary-memory-list li {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--background);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.itinerary-memory-list li > span {
+  color: var(--muted-foreground);
+}
+.itinerary-memory-photos { display: flex; gap: 6px; margin-top: 5px; }
+.itinerary-memory-photos a,
+.itinerary-memory-photos img {
+  display: block;
+  width: 46px;
+  height: 46px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+.itinerary-memory-list a,
+.itinerary-memory-manage {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.itinerary-memory-manage { font-size: 12px; }
+.itinerary-memory-exclude {
+  justify-self: start;
+  margin-top: 5px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.itinerary-memory-exclude:disabled { opacity: 0.5; }
+.planning-memory-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.planning-memory-choice input { accent-color: var(--primary); }
+.planning-memory-compare,
+.planning-version-diff {
+  margin: 16px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.planning-memory-compare p,
+.planning-version-diff p { margin: 0 0 8px; color: var(--muted-foreground); }
+.planning-memory-compare h2 { margin: 0 0 7px; font-size: 15px; font-weight: 650; }
+.planning-snapshot-details { margin: 10px 0; }
+.planning-snapshot-details div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.planning-snapshot-details dt { color: var(--muted-foreground); }
+.planning-snapshot-details dd { margin: 0; overflow-wrap: anywhere; }
+.planning-memory-compare button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--primary);
+  border-radius: 5px;
+  color: var(--primary);
+  font-weight: 600;
+}
+.planning-version-diff h2 { margin: 0 0 6px; font-size: 15px; font-weight: 650; }
+.planning-version-day { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.planning-version-day span { display: block; margin-bottom: 5px; font-weight: 650; }
 .itinerary-front-guides {
   margin: 12px 0;
 }

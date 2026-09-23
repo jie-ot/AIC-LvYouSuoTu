@@ -1,10 +1,7 @@
-"""Unique external-fact aggregation entry (《外部事实源与工具调用规范》五).
+"""Unique external-fact aggregation entry for planning tools.
 
-Only this service (called by `planning_service`) may invoke whitelisted tools.
-The initial planning turn no longer pre-injects B-class entry guides; B-class
-fallback rules live in the planning prompt and A′ tool failures still return a
-structured official entry. Function Calling facts are executed here through
-`execute_tool`, validated, logged, and returned to the model as compact JSON.
+Only this service may invoke whitelisted providers. Function-calling requests
+are validated, logged, and returned to the model as compact fact records.
 """
 
 from __future__ import annotations
@@ -20,17 +17,13 @@ from pydantic import ValidationError
 
 from app.ai.tools import (
     amap_provider,
-    entry_guides,
     flight_text_parser,
-    rail_mcp_provider,
     tool_specs,
     variflight_aviation_provider,
     variflight_tripmatch_provider,
 )
 from app.ai.tools.schemas import (
-    BookingEvidence,
     PoiFact,
-    RailFact,
     RouteFact,
     TravelFactPack,
     WeatherFact,
@@ -47,12 +40,7 @@ _TOOL_LOG_WRITE_LOCK = threading.Lock()
 
 
 def needs_facts(message: str, context: ItineraryData | None) -> bool:
-    """Whether planning should build an initial controlled fact pack.
-
-    A/A′ facts are fetched through Function Calling. Returning false prevents
-    ready-made B-class guidance from anchoring the model before it tries the
-    relevant tools.
-    """
+    """Whether planning should build an initial controlled fact pack."""
     return False
 
 
@@ -64,7 +52,7 @@ def build_fact_pack(
     task_type: str = "planning",
     request_id: str | None = None,
 ) -> TravelFactPack:
-    """Build an empty compatibility pack; initial B-class prefill is disabled."""
+    """Build an empty compatibility pack; facts arrive through tool calls."""
     request_id = request_id or id_service.new_id("toolreq_")
     pack = TravelFactPack(request_id=request_id, generated_at=utcnow().isoformat())
 
@@ -79,7 +67,6 @@ def build_fact_pack(
         routes_prefetched=0,
         weather_prefetched=0,
         pois_prefetched=0,
-        rails_prefetched=0,
     )
     return pack
 
@@ -91,7 +78,6 @@ def _persist_log(
     tool_name: str,
     provider: str,
     status: str,
-    degraded_to_b: bool,
     latency_ms: int | None,
     input_summary: dict | None,
     output_summary: dict | None,
@@ -108,7 +94,6 @@ def _persist_log(
         provider=provider,
         fact_status=status,
         normalized_status=normalized_status,
-        degraded_to_b=degraded_to_b,
         latency_ms=latency_ms,
         error_code=error_code,
         input_summary=_diagnostic_value(input_summary),
@@ -132,8 +117,7 @@ def _persist_log(
                         provider=provider,
                         input_summary=input_summary,
                         output_summary=output_summary,
-                        status="fallback" if degraded_to_b else normalized_status,
-                        degraded_to_b=degraded_to_b,
+                        status=normalized_status,
                         latency_ms=latency_ms,
                         error_code=error_code,
                     )
@@ -148,9 +132,6 @@ def _log_status(fact_status: str) -> str:
         return "success"
     if fact_status == "timeout":
         return "timeout"
-    if fact_status == "needs_official_confirmation":
-        # B-class template generated successfully (degrade handled by caller).
-        return "success"
     return "failed"
 
 
@@ -160,8 +141,8 @@ def _log_status(fact_status: str) -> str:
 #
 # The model (via the orchestrator's intercepted function calls) proposes which
 # whitelist tool to run; this is the ONLY entry that executes those calls. It
-# validates arguments against the per-tool Pydantic schema, applies config
-# gating + the A′→B degrade rule, writes a desensitized tool_call_logs row, and
+# validates arguments against the per-tool Pydantic schema, applies provider
+# gating, writes a desensitized tool_call_logs row, and
 # returns a compact JSON-serializable result the model can read. It NEVER
 # raises — any problem becomes a structured result so a single tool hiccup can
 # never fail `/api/ai/planning`.
@@ -185,7 +166,6 @@ def execute_tool(
             tool_name=tool_name,
             provider="unknown",
             status="failed",
-            degraded_to_b=False,
             latency_ms=None,
             input_summary={"arguments": _diagnostic_value(arguments)},
             output_summary={
@@ -212,7 +192,6 @@ def execute_tool(
             tool_name=tool_name,
             provider="unknown",
             status="failed",
-            degraded_to_b=False,
             latency_ms=None,
             input_summary={"arguments": _diagnostic_value(arguments)},
             output_summary={
@@ -240,16 +219,20 @@ def execute_tool(
             return _exec_amap_poi_detail(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_AMAP_ROUTE:
             return _exec_amap_route(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR:
+            return _exec_flights_by_dep_arr(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO:
+            return _exec_flight_transfer(user_id, request_id, task_type, args)
         if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES:
             return _exec_flight_itineraries(user_id, request_id, task_type, args)
-        if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER:
-            return _exec_flight_transfer(user_id, request_id, task_type, args)
-        if tool_name == tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER:
+        if tool_name == tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO:
             return _exec_flight_train_transfer(
                 user_id, request_id, task_type, args
             )
-        if tool_name == tool_specs.TOOL_QUERY_RAIL:
-            return _exec_rail(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_TRAIN_TICKETS:
+            return _exec_train_tickets(user_id, request_id, task_type, args)
+        if tool_name == tool_specs.TOOL_SEARCH_TRAIN_STATIONS:
+            return _exec_train_stations(user_id, request_id, task_type, args)
     except Exception as exc:  # noqa: BLE001
         logger.exception("execute_tool failed (tool=%s, non-fatal)", tool_name)
         _persist_log(
@@ -259,7 +242,6 @@ def execute_tool(
             tool_name=tool_name,
             provider="unknown",
             status="failed",
-            degraded_to_b=False,
             latency_ms=None,
             input_summary={
                 "validated_arguments": _diagnostic_value(
@@ -336,6 +318,15 @@ def _diagnostic_value(value, *, depth: int = 0):  # noqa: ANN001, ANN202
 AMAP_FORECAST_HORIZON_DAYS = 3
 
 
+def _attach_amap_unavailability(result: dict, status: str) -> None:
+    if status == "ok":
+        return
+    error_code = amap_provider.unavailability_error_code()
+    if error_code:
+        result["error_code"] = error_code
+        result["retryable"] = False
+
+
 def _beyond_forecast_horizon(start_date: str) -> bool:
     """Whether even the first requested day is past AMap's forecast horizon."""
     today = datetime.now(timezone(timedelta(hours=8))).date()
@@ -376,8 +367,7 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
             tool_name=tool_specs.TOOL_AMAP_WEATHER_RANGE,
             provider="amap",
             status="out_of_forecast_horizon",
-            degraded_to_b=False,
-            latency_ms=int((time.monotonic() - started) * 1000),
+                latency_ms=int((time.monotonic() - started) * 1000),
             input_summary={
                 "city": args.city,
                 "adcode": weather_query,
@@ -416,7 +406,6 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
         tool_name=tool_specs.TOOL_AMAP_WEATHER_RANGE,
         provider=provider,
         status=status,
-        degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "city": args.city,
@@ -437,6 +426,7 @@ def _exec_amap_weather_range(user_id, request_id, task_type, args) -> dict:  # n
         "forecast_horizon_days": 3,
         "days": [_weather_summary(fact) for fact in facts],
     }
+    _attach_amap_unavailability(result, status)
     if status != "ok":
         result["note"] = "部分或全部日期未获取到天气，建议以官方天气预报为准"
     return result
@@ -472,7 +462,6 @@ def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN00
         tool_name=tool_specs.TOOL_AMAP_POI_SEARCH,
         provider=provider,
         status=status,
-        degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "keyword": args.keyword,
@@ -490,6 +479,7 @@ def _exec_amap_poi(user_id, request_id, task_type, args) -> dict:  # noqa: ANN00
         "count": len(facts),
         "pois": _poi_list_summary(facts[: args.limit]),
     }
+    _attach_amap_unavailability(result, status)
     if status != "ok":
         result["note"] = "未获取到该地点信息，建议以官方/地图实际为准"
     return result
@@ -529,7 +519,6 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
         tool_name=tool_specs.TOOL_AMAP_POI_AROUND,
         provider=provider,
         status=status,
-        degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "location": args.location,
@@ -550,6 +539,7 @@ def _exec_amap_poi_around(user_id, request_id, task_type, args) -> dict:  # noqa
         "count": len(facts),
         "pois": _poi_list_summary(facts[: args.limit]),
     }
+    _attach_amap_unavailability(result, status)
     if status != "ok":
         result["note"] = "未获取到周边 POI，建议以地图/官方平台实际为准"
     return result
@@ -579,7 +569,6 @@ def _exec_amap_poi_detail(user_id, request_id, task_type, args) -> dict:  # noqa
         tool_name=tool_specs.TOOL_AMAP_POI_DETAIL,
         provider="amap",
         status=status,
-        degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={"poi_ids": args.poi_ids},
         output_summary={"pois": _poi_list_summary(facts)},
@@ -591,6 +580,7 @@ def _exec_amap_poi_detail(user_id, request_id, task_type, args) -> dict:  # noqa
         "count": len(facts),
         "pois": _poi_list_summary(facts),
     }
+    _attach_amap_unavailability(result, status)
     if status != "ok":
         result["note"] = "部分 POI 详情未获取到，建议以地图/景区官方信息为准"
     return result
@@ -683,7 +673,6 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
         tool_name=tool_specs.TOOL_AMAP_ROUTE,
         provider=provider,
         status=fact.status,
-        degraded_to_b=False,
         latency_ms=int((time.monotonic() - started) * 1000),
         input_summary={
             "origin": origin_name,
@@ -711,6 +700,7 @@ def _exec_amap_route(user_id, request_id, task_type, args) -> dict:  # noqa: ANN
         error_code=None,
     )
     result = {"tool": tool_specs.TOOL_AMAP_ROUTE, **_route_summary(fact)}
+    _attach_amap_unavailability(result, fact.status)
     if fact.status != "ok":
         result["note"] = "未获取到路线，建议以地图实际导航为准"
     return result
@@ -744,16 +734,6 @@ def _resolve_route_endpoint(
     )
 
 
-def _booking_summary(guide: BookingEvidence) -> dict:
-    return {
-        "status": guide.status,
-        "booking_type": guide.booking_type,
-        "official_channel": guide.official_channel,
-        "query_hint": guide.query_hint,
-        "notes": guide.notes,
-    }
-
-
 def _weather_summary(fact: WeatherFact) -> dict:
     return fact.model_dump(exclude_none=True)
 
@@ -775,26 +755,6 @@ def _facts_status(facts) -> str:  # noqa: ANN001
 
 def _route_summary(fact: RouteFact) -> dict:
     return fact.model_dump(exclude_none=True)
-
-
-def _rail_summary(fact: RailFact) -> dict:
-    return {
-        "status": fact.status,
-        "origin": fact.origin,
-        "destination": fact.destination,
-        "date": fact.date,
-        "train_no": fact.train_no,
-        "depart_time": fact.depart_time,
-        "arrive_time": fact.arrive_time,
-        "duration": fact.duration,
-        "seat_class": fact.seat_class,
-        "ref_price": fact.ref_price,
-        "source": fact.source,
-    }
-
-
-def _rail_list_summary(facts: list[RailFact]) -> list[dict]:
-    return [_rail_summary(fact) for fact in facts]
 
 
 def _tripmatch_output_summary(outcome) -> dict:  # noqa: ANN001
@@ -907,10 +867,14 @@ def _tripmatch_result(  # noqa: ANN001
         "provider_raw_text": outcome.raw_text,
         "provider_parsed_content": outcome.content,
     }
+    if outcome.status == "ok":
+        result["fact_status"] = "verified"
     candidates = _flight_candidates(outcome)
     if candidates:
         # Each independently selectable flight/transfer can receive its own
         # fact_id while the original provider payload remains lossless.
+        for candidate in candidates:
+            candidate["fact_status"] = "verified"
         result["candidates"] = candidates
     # `provider_payload`/`provider_raw_text` are stripped before the model sees
     # the fact, so the upstream answer must also survive in a bounded field.
@@ -939,7 +903,7 @@ def _tripmatch_result(  # noqa: ANN001
             f"填写 {api_key_env} 后生效"
         )
     elif outcome.status != "ok":
-        result["note"] = "航班数据暂不可用，请以航司或机场官方渠道复核"
+        result["note"] = "交通数据暂不可用"
     return result
 
 
@@ -963,226 +927,173 @@ def _is_retryable_provider_result(
             "upstream_error",
             "connection",
             "temporar",
-            "warming_up",
-            "call_failed",
-            "startup_or_call_failed",
         )
+    )
+
+
+def _logged_variflight_result(  # noqa: ANN001
+    user_id,
+    request_id,
+    task_type,
+    *,
+    tool_name: str,
+    query: dict,
+    outcome,
+    provider_module,
+    started: float,
+) -> dict:
+    latency = int((time.monotonic() - started) * 1000)
+    _persist_log(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_name,
+        provider=provider_module.PROVIDER,
+        status=outcome.status,
+        latency_ms=latency,
+        input_summary={
+            **query,
+            "endpoint": provider_module.endpoint_identity(),
+            "api_key_present": provider_module.is_configured(),
+        },
+        output_summary=_tripmatch_output_summary(outcome),
+        error_code=outcome.error_code,
+    )
+    return _tripmatch_result(
+        tool_name,
+        query,
+        outcome,
+        provider=provider_module.PROVIDER,
+    )
+
+
+def _exec_flights_by_dep_arr(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    query = {
+        "date": args.date,
+        **({"dep": args.dep} if args.dep else {}),
+        **({"depcity": args.depcity} if args.depcity else {}),
+        **({"arr": args.arr} if args.arr else {}),
+        **({"arrcity": args.arrcity} if args.arrcity else {}),
+    }
+    outcome = variflight_aviation_provider.search_flights_by_dep_arr_sync(
+        date=args.date,
+        dep=args.dep,
+        depcity=args.depcity,
+        arr=args.arr,
+        arrcity=args.arrcity,
+    )
+    return _logged_variflight_result(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_aviation_provider,
+        started=started,
     )
 
 
 def _exec_flight_itineraries(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
-    outcome = variflight_aviation_provider.search_flight_itineraries_sync(
-        args.dep_city_code, args.dep_date, args.arr_city_code
-    )
-    latency = int((time.monotonic() - started) * 1000)
     query = {
         "depCityCode": args.dep_city_code,
         "depDate": args.dep_date,
         "arrCityCode": args.arr_city_code,
     }
-    _persist_log(
+    outcome = variflight_aviation_provider.search_flight_itineraries_sync(
+        args.dep_city_code, args.dep_date, args.arr_city_code
+    )
+    return _logged_variflight_result(
         user_id,
         request_id,
         task_type,
         tool_name=tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        provider=variflight_aviation_provider.PROVIDER,
-        status=outcome.status,
-        degraded_to_b=False,
-        latency_ms=latency,
-        input_summary={
-            **query,
-            "endpoint": variflight_aviation_provider.endpoint_identity(),
-            "api_key_present": variflight_aviation_provider.is_configured(),
-        },
-        output_summary=_tripmatch_output_summary(outcome),
-        error_code=outcome.error_code,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_aviation_provider,
+        started=started,
     )
-    result = _tripmatch_result(
-        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        query,
-        outcome,
-        provider=variflight_aviation_provider.PROVIDER,
-    )
-    result["verification"] = (
-        "指定日期方案与价格均为查询时参考，出票前须在航司或正规售票平台复核"
-    )
-    return result
 
 
 def _exec_flight_transfer(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
-    outcome = variflight_aviation_provider.search_flight_transfer_sync(
+    outcome = variflight_aviation_provider.get_flight_transfer_info_sync(
         args.depcity, args.arrcity, args.depdate
     )
-    latency = int((time.monotonic() - started) * 1000)
     query = {
         "depcity": args.depcity,
         "arrcity": args.arrcity,
         "depdate": args.depdate,
     }
-    _persist_log(
+    return _logged_variflight_result(
         user_id,
         request_id,
         task_type,
-        tool_name=tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        provider=variflight_aviation_provider.PROVIDER,
-        status=outcome.status,
-        degraded_to_b=False,
-        latency_ms=latency,
-        input_summary={
-            **query,
-            "endpoint": variflight_aviation_provider.endpoint_identity(),
-            "api_key_present": variflight_aviation_provider.is_configured(),
-        },
-        output_summary=_tripmatch_output_summary(outcome),
-        error_code=outcome.error_code,
+        tool_name=tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_aviation_provider,
+        started=started,
     )
-    result = _tripmatch_result(
-        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        query,
-        outcome,
-        provider=variflight_aviation_provider.PROVIDER,
-        api_key_env="VARIFLIGHT_API_KEY",
-    )
-    result["query_horizon"] = (
-        "上游文档限定为从查询时点起至多未来 48 小时；超出窗口不得表述为已查询到"
-    )
-    result["transfer_type"] = "flight_to_flight"
-    return result
 
 
 def _exec_flight_train_transfer(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
-    outcome = variflight_tripmatch_provider.search_flight_train_transfer_sync(
+    outcome = variflight_tripmatch_provider.get_flight_train_transfer_info_sync(
         args.depcity, args.arrcity, args.depdate
     )
-    latency = int((time.monotonic() - started) * 1000)
     query = {
         "depcity": args.depcity,
         "arrcity": args.arrcity,
         "depdate": args.depdate,
     }
-    _persist_log(
+    return _logged_variflight_result(
         user_id,
         request_id,
         task_type,
-        tool_name=tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
-        provider=variflight_tripmatch_provider.PROVIDER,
-        status=outcome.status,
-        degraded_to_b=False,
-        latency_ms=latency,
-        input_summary={
-            **query,
-            "endpoint": variflight_tripmatch_provider.endpoint_identity(),
-            "api_key_present": variflight_tripmatch_provider.is_configured(),
-        },
-        output_summary=_tripmatch_output_summary(outcome),
-        error_code=outcome.error_code,
+        tool_name=tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_tripmatch_provider,
+        started=started,
     )
-    result = _tripmatch_result(
-        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER, query, outcome
-    )
-    result["rail_verification"] = {
-        "required": True,
-        "tool": tool_specs.TOOL_QUERY_RAIL,
-        "instruction": (
-            "Tripmatch 仅用于发现空铁中转候选；对每个入选铁路段，必须按实际起终点和日期"
-            "另行调用 query_rail_tickets，由现有 12306 MCP 查询车次、时刻、票价和余票参考。"
-        ),
-    }
-    return result
 
 
-def _guide_dict(guide: BookingEvidence) -> dict:
-    return {
-        "booking_type": guide.booking_type,
-        "official_channel": guide.official_channel,
-        "query_hint": guide.query_hint,
-        "notes": guide.notes,
-    }
-
-
-def _exec_rail(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+def _exec_train_tickets(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
     started = time.monotonic()
-    guide = entry_guides.rail_entry_guide(
-        origin=args.origin, destination=args.destination, date=args.date
+    query = {
+        "from_city": args.from_city,
+        "to_city": args.to_city,
+        "date": args.date,
+    }
+    outcome = variflight_tripmatch_provider.search_train_tickets_sync(
+        args.from_city, args.to_city, args.date
     )
-    facts: list[RailFact] = []
-    if rail_mcp_provider.is_enabled():
-        facts = rail_mcp_provider.query_rail_options_sync(
-            args.origin, args.destination, args.date, max_options=16
-        )
-    latency = int((time.monotonic() - started) * 1000)
-    if facts:
-        _persist_log(
-            user_id,
-            request_id,
-            task_type,
-            tool_name="rail_query_mcp",
-            provider="rail_query_mcp",
-            status="ok",
-            degraded_to_b=False,
-            latency_ms=latency,
-            input_summary={
-                "origin": args.origin,
-                "destination": args.destination,
-                "date": args.date,
-            },
-            output_summary={"candidates": _rail_list_summary(facts)},
-            error_code=None,
-        )
-        recommended = facts[0]
-        return {
-            "tool": tool_specs.TOOL_QUERY_RAIL,
-            "status": "ok",
-            "reference": True,
-            "origin": recommended.origin,
-            "destination": recommended.destination,
-            "date": recommended.date,
-            "recommended": _rail_summary(recommended),
-            "candidates": _rail_list_summary(facts),
-            "source": "community_mcp",
-            "disclaimer": "参考级数据，以 12306 官方实时为准，票价/余票请在 12306 官方渠道确认",
-            "official_entry": _guide_dict(guide),
-        }
-    attempted = rail_mcp_provider.is_enabled()
-    runtime_status = rail_mcp_provider.runtime_status()
-    query_error_code = (
-        rail_mcp_provider.last_query_error_code() if attempted else None
-    )
-    error_code = query_error_code or {
-        "absent": "rail_mcp_not_started",
-        "starting": "rail_mcp_warming_up",
-        "failed": "rail_mcp_startup_or_call_failed",
-        "invalid": "rail_mcp_invalid_endpoint",
-        "ready": "rail_mcp_empty_or_invalid_result",
-    }.get(runtime_status, "rail_mcp_unavailable" if attempted else None)
-    _persist_log(
+    return _logged_variflight_result(
         user_id,
         request_id,
         task_type,
-        tool_name=entry_guides.TOOL_RAIL,
-        provider="rail_query_mcp" if attempted else entry_guides.PROVIDER_RAIL,
-        status="needs_official_confirmation",
-        degraded_to_b=attempted,
-        latency_ms=latency,
-        input_summary={
-            "origin": args.origin,
-            "destination": args.destination,
-            "date": args.date,
-        },
-        output_summary=_booking_summary(guide),
-        error_code=error_code,
+        tool_name=tool_specs.TOOL_SEARCH_TRAIN_TICKETS,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_tripmatch_provider,
+        started=started,
     )
-    return {
-        "tool": tool_specs.TOOL_QUERY_RAIL,
-        "status": "needs_official_confirmation",
-        "note": "暂未获取到参考车次（社区 MCP 可能正在预热或不可用），请在 12306 官方 App 查询车次/席别/时刻并尽早购票或候补",
-        "official_entry": _guide_dict(guide),
-        "error_code": error_code,
-        "retryable": _is_retryable_provider_result(
-            status="needs_official_confirmation",
-            error_code=error_code,
-        ),
-    }
+
+
+def _exec_train_stations(user_id, request_id, task_type, args) -> dict:  # noqa: ANN001
+    started = time.monotonic()
+    query = {"query": args.query}
+    outcome = variflight_tripmatch_provider.search_train_stations_sync(args.query)
+    return _logged_variflight_result(
+        user_id,
+        request_id,
+        task_type,
+        tool_name=tool_specs.TOOL_SEARCH_TRAIN_STATIONS,
+        query=query,
+        outcome=outcome,
+        provider_module=variflight_tripmatch_provider,
+        started=started,
+    )

@@ -51,11 +51,11 @@ ALLOWED_MIME_TYPES = set(EXTENSION_TO_MIME.values())
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 # Moderate compression for uploads: cap the longest edge and re-encode lossy
-# formats at a balanced quality. Lossless PNG is only re-optimized. These are
-# safety/storage values, not business fields.
-UPLOAD_MAX_EDGE_PX = 2048
-UPLOAD_JPEG_QUALITY = 85
-UPLOAD_WEBP_QUALITY = 85
+# formats at a balanced quality. PNG stays lossless unless that exceeds the
+# stored-file limit, when it falls back to WebP. These are storage safeguards.
+UPLOAD_MAX_EDGE_PX = 2560
+UPLOAD_JPEG_QUALITY = 90
+UPLOAD_WEBP_QUALITY = 90
 
 
 @dataclass
@@ -125,6 +125,11 @@ def build_report_cover_relative_path(ext: str) -> str:
     return build_relative_path(PREFIX_GENERATED_REPORTS, ext)
 
 
+def build_plan_cover_relative_path(ext: str) -> str:
+    """Store a plan-only trip cover under the existing images prefix."""
+    return build_relative_path(PREFIX_IMAGES, ext)
+
+
 def _ensure_parent_dir(abs_path: str) -> None:
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
@@ -170,6 +175,8 @@ def save_upload(content: bytes, filename: str | None, content_type: str | None) 
         raise InvalidParamError("文件不是合法图片") from exc
 
     content, ext = _compress_image(content, ext)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise InvalidParamError("图片压缩后仍超过大小上限")
 
     relative_path = build_upload_relative_path(ext)
     abs_path = resolve_static_path(relative_path)
@@ -192,7 +199,7 @@ def _compress_image(content: bytes, ext: str) -> tuple[bytes, str]:
     """Apply moderate compression to an uploaded image.
 
     Downscales so the longest edge is at most ``UPLOAD_MAX_EDGE_PX`` and
-    re-encodes JPEG/WebP at a balanced quality; PNG is re-optimized losslessly.
+    re-encodes JPEG/WebP at a balanced quality; PNG stays lossless when possible.
     EXIF orientation is baked in so the stored pixels display upright. A
     re-encode failure rejects the upload rather than retaining metadata.
     """
@@ -219,6 +226,10 @@ def _compress_image(content: bytes, ext: str) -> tuple[bytes, str]:
                 img.save(buffer, format="WEBP", quality=UPLOAD_WEBP_QUALITY, method=6)
             elif ext == "png":
                 img.save(buffer, format="PNG", optimize=True)
+                if buffer.tell() > MAX_UPLOAD_BYTES:
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="WEBP", quality=UPLOAD_WEBP_QUALITY, method=6)
+                    ext = "webp"
             else:
                 return content, ext
     except Exception as exc:  # noqa: BLE001

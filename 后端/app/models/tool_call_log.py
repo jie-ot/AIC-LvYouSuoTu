@@ -37,9 +37,8 @@ class ToolCallLog(SQLModel, table=True):
     output_summary: dict[str, Any] | None = Field(
         default=None, sa_column=Column(SA_JSON, nullable=True)
     )
-    # success / timeout / failed / fallback
+    # success / timeout / failed
     status: str = Field(nullable=False)
-    degraded_to_b: bool = Field(default=False, nullable=False)
     latency_ms: int | None = Field(default=None, nullable=True)
     error_code: str | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)

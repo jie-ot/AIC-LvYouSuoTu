@@ -21,9 +21,9 @@ from collections.abc import Callable
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from app.ai import output_parser, planning_feasibility, planning_research_state
 from app.ai.clients import ark_chat_client, ark_image_client
@@ -47,7 +47,6 @@ from app.ai.schemas import (
     PostcardSelectionResult,
     PostcardTypeStyle,
     ReportCopyResult,
-    ReportDraftResult,
 )
 from app.ai.tools import tool_specs
 from app.core import planning_progress
@@ -55,7 +54,7 @@ from app.core.business_logging import call_in_current_context, log_event, timed_
 from app.core.config import settings
 from app.core.exceptions import AIGenerationError, ImageInputPolicyError
 from app.models.itinerary import ItineraryData
-from app.models.dto import PlanningBrief, PlanningChatMessage, TravelProfileData
+from app.models.dto import PlanningBrief, PlanningChatMessage
 from app.services.schedule_time import parse_clock_minutes, timeline_end_minutes
 
 logger = logging.getLogger("lvyousuotu")
@@ -114,10 +113,9 @@ _TOOL_HISTORY_DISCARDED_KEY = "historyDiscarded"
 # Marker embedded in confirmed_requirement_text; compaction must never rewrite
 # the user message that carries the confirmation checklist.
 _CONFIRMATION_CHECKLIST_MARKER = "【确认清单】"
-# Eleven enabled AMap endpoint buckets × the console-confirmed 3 QPS each. This
-# fills the purchased aggregate capacity without spawning one thread per call.
+# Threads may prepare independent work concurrently; amap_provider serializes
+# outbound requests against the API key's aggregate QPS allowance.
 _MAX_PARALLEL_EXTERNAL_TOOLS = 33
-_JSON_REPAIR_TIMEOUT_SECONDS = 60
 _PLAIN_FALLBACK_TIMEOUT_SECONDS = 90
 _MAX_FINAL_FACTS = 96
 _MAX_FINAL_FACTS_PER_QUERY = {
@@ -126,10 +124,12 @@ _MAX_FINAL_FACTS_PER_QUERY = {
     "amap_poi_detail": 10,
     "amap_route": 1,
     "amap_weather_range": 8,
-    "query_rail_tickets": 8,
+    "searchFlightsByDepArr": 8,
+    "getFlightTransferInfo": 6,
     "searchFlightItineraries": 8,
-    "searchFlightsTransferinfo": 6,
-    "searchFlightandTrainTransferinfo": 6,
+    "getFlightAndTrainTransferInfo": 6,
+    "searchTrainTickets": 8,
+    "searchTrainStations": 4,
 }
 _FINAL_FACT_DROP_KEYS = frozenset(
     {
@@ -169,33 +169,23 @@ def photo_analyze_parallelism(batch_count: int | None = None) -> int:
     return max(1, min(batch_count, configured))
 
 
-def photo_analyze_parallel_wave_count(photo_count: int) -> int:
-    """How many waves are needed after applying the concurrency cap."""
-    batch_count = photo_analyze_batch_count(photo_count)
-    if batch_count <= 0:
-        return 0
-    workers = photo_analyze_parallelism(batch_count)
-    return (batch_count + workers - 1) // workers
-
-
-def photo_analyze_parallel_wall_budget_seconds(photo_count: int | None = None) -> float:
-    """Worst-case wall time for photo understanding under the concurrency cap."""
-    per_wave = settings.ARK_TEXT_TIMEOUT_SECONDS * max(1, settings.MODEL_MAX_RETRY + 1)
-    if photo_count is None:
-        return per_wave
-    return photo_analyze_parallel_wave_count(photo_count) * per_wave
-
-
 # A callable injected by the service layer: (tool_name, arguments) -> result
 # dict. The orchestrator intercepts the model's function calls and routes them
 # here; the service (travel_fact_service) validates + executes them. The
 # orchestrator never imports a Provider or travel_fact_service directly.
 ToolExecutor = Callable[[str, dict], dict]
-StructuredResultT = TypeVar("StructuredResultT", bound=BaseModel)
 
 
 class _PlanningFallbackExhausted(AIGenerationError):
     """The bounded same-context JSON recovery path has been exhausted."""
+
+
+class PartialPostcardCreativePlanError(AIGenerationError):
+    """Carry validated postcard siblings when individual creative slots fail."""
+
+    def __init__(self, candidates: list[PostcardPlanItem | None]) -> None:
+        super().__init__("部分明信片创意未通过校验")
+        self.candidates = candidates
 
 
 def _execute_external_batch(
@@ -206,11 +196,9 @@ def _execute_external_batch(
 ) -> dict[str, dict[str, Any]]:
     """Run independent queries concurrently with per-query transient retries.
 
-    The key is normally the normalized cache key. AMap and independent
-    Tripmatch calls share the general worker pool; 12306 calls stay serial
-    because its persistent MCP session is not documented as concurrency-safe,
-    while still overlapping with the other providers. Retry budget is reserved
-    only for the query that failed; unrelated queries are never replayed.
+    The key is normally the normalized cache key. Independent AMap and
+    VariFlight HTTP calls share the worker pool. Retry budget is reserved only
+    for the query that failed; unrelated queries are never replayed.
     """
     if not requests:
         return {}
@@ -273,26 +261,13 @@ def _execute_external_batch(
         )
         return result
 
-    general = {
-        key: item
-        for key, item in requests.items()
-        if item[0] != tool_specs.TOOL_QUERY_RAIL
-    }
-    rail = {
-        key: item
-        for key, item in requests.items()
-        if item[0] == tool_specs.TOOL_QUERY_RAIL
-    }
     results: dict[str, dict[str, Any]] = {}
-    workers = max(1, min(_MAX_PARALLEL_EXTERNAL_TOOLS, len(general)))
+    workers = max(1, min(_MAX_PARALLEL_EXTERNAL_TOOLS, len(requests)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             key: pool.submit(call_in_current_context(run_one, tool_name, arguments))
-            for key, (tool_name, arguments) in general.items()
+            for key, (tool_name, arguments) in requests.items()
         }
-        # Keep the MCP lane serial but execute it while AMap futures are running.
-        for key, (tool_name, arguments) in rail.items():
-            results[key] = run_one(tool_name, arguments)
         for key, future in futures.items():
             results[key] = future.result()
     return results
@@ -304,10 +279,12 @@ _ACTIVITY_TOOL_LABELS: dict[str, str] = {
     tool_specs.TOOL_AMAP_POI_AROUND: "周边",
     tool_specs.TOOL_AMAP_POI_DETAIL: "地点详情",
     tool_specs.TOOL_AMAP_ROUTE: "路线",
-    tool_specs.TOOL_QUERY_RAIL: "火车票",
-    tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES: "航班",
-    tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER: "航班中转",
-    tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER: "空铁联运",
+    tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR: "直飞航班",
+    tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO: "航班中转",
+    tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES: "航线方案",
+    tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO: "空铁联运",
+    tool_specs.TOOL_SEARCH_TRAIN_TICKETS: "火车票",
+    tool_specs.TOOL_SEARCH_TRAIN_STATIONS: "火车站",
 }
 
 
@@ -320,19 +297,24 @@ def _tool_activity_label(
     kind = _ACTIVITY_TOOL_LABELS.get(tool_name, tool_name)
     origin = (
         arguments.get("origin")
+        or arguments.get("from_city")
         or arguments.get("depCityCode")
         or arguments.get("depcity")
+        or arguments.get("dep")
     )
     destination = (
         arguments.get("destination")
+        or arguments.get("to_city")
         or arguments.get("arrCityCode")
         or arguments.get("arrcity")
+        or arguments.get("arr")
     )
     if origin and destination:
         subject = f"{origin}→{destination}"
     else:
         subject = str(
             arguments.get("keyword")
+            or arguments.get("query")
             or arguments.get("city")
             or arguments.get("location")
             or ""
@@ -388,9 +370,6 @@ def _classify_tool_retry(result: dict[str, Any]) -> tuple[bool, str]:
         "upstream_error",
         "connection",
         "temporar",
-        "warming_up",
-        "call_failed",
-        "startup_or_call_failed",
     )
     if any(marker in error_code for marker in transient_markers):
         return True, error_code
@@ -403,13 +382,74 @@ def _cacheable_tool_result(result: dict[str, Any]) -> bool:
     return not retryable
 
 
+def _terminal_tool_failure_scope(
+    tool_name: str,
+    result: dict[str, Any],
+) -> set[str]:
+    """Return provider tools that cannot recover within the current request."""
+    code = str(result.get("error_code") or "").lower()
+    status = str(result.get("status") or "").lower()
+    text = f"{code} {status}"
+    provider_terminal = (
+        "provider_not_connected",
+        "quota_paused",
+        "quota_exceeded",
+        "invalid_key",
+        "auth_or_permission",
+        "not_configured",
+    )
+    amap_tools = {
+        tool_specs.TOOL_AMAP_WEATHER_RANGE,
+        tool_specs.TOOL_AMAP_POI_SEARCH,
+        tool_specs.TOOL_AMAP_POI_AROUND,
+        tool_specs.TOOL_AMAP_POI_DETAIL,
+        tool_specs.TOOL_AMAP_ROUTE,
+    }
+    if tool_name in amap_tools and any(marker in text for marker in provider_terminal):
+        return amap_tools
+    variflight_tools = {
+        tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
+        tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
+        tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+        tool_specs.TOOL_SEARCH_TRAIN_TICKETS,
+        tool_specs.TOOL_SEARCH_TRAIN_STATIONS,
+    }
+    if tool_name in variflight_tools and any(
+        marker in text for marker in provider_terminal
+    ):
+        return variflight_tools
+    return set()
+
+
+def _circuit_open_tool_result(tool_name: str, reason: str) -> dict[str, Any]:
+    return {
+        "tool": tool_name,
+        "status": "error",
+        "error_code": "provider_circuit_open",
+        "retryable": False,
+        "message": (
+            "本次规划中该事实源已确认不可用，不再重复查询；"
+            "请保留未核验状态"
+        ),
+        "provider_failure": reason,
+    }
+
+
+def _available_planning_tools(
+    tools: list[dict[str, Any]], unavailable: set[str],
+) -> list[dict[str, Any]]:
+    return [
+        tool
+        for tool in tools
+        if str((tool.get("function") or {}).get("name") or "") not in unavailable
+    ]
+
+
 def _tool_result_has_usable_fact(result: dict[str, Any]) -> bool:
     context = result.get("result_context")
     context_status = context.get("status") if isinstance(context, dict) else None
-    return str(result.get("status") or context_status or "").lower() in {
-        "ok",
-        "needs_official_confirmation",
-    }
+    return str(result.get("status") or context_status or "").lower() == "ok"
 
 
 def analyze_photos(
@@ -674,57 +714,6 @@ def _merge_end_date(
     return max(dates) if dates else None
 
 
-def select_postcard_photos(
-    *,
-    analysis: PhotoAnalysisResult,
-    requirements: str,
-    memory_summary: str,
-) -> PostcardSelectionResult:
-    """Choose postcard count and source photos without inventing visual ideas.
-
-    The postcard count is decided entirely by the model from the requirement
-    text per the prompt rules (≤5 → that many; >5 → 5; unspecified → 3). The
-    backend passes no count and never parses it from natural language.
-    """
-    system_prompt = load_prompt("postcard_prompt_system.md")
-    usable = [p for p in analysis.photos if p.suitability != "unsuitable"]
-    if not usable:
-        raise AIGenerationError("没有适合生成明信片的照片")
-    filtered_analysis = PhotoAnalysisResult(
-        photos=usable,
-        overall_location=analysis.overall_location,
-        start_date=analysis.start_date,
-        end_date=analysis.end_date,
-    )
-    user_text = context_builder.build_postcard_selection_user_text(
-        analysis=filtered_analysis,
-        requirements=requirements,
-        memory_summary=memory_summary,
-    )
-    allowed_asset_ids = {item.asset_id for item in usable}
-
-    def _validate(result: PostcardSelectionResult) -> None:
-        if not 1 <= len(result.items) <= 5:
-            raise AIGenerationError("AI 生成失败：明信片选图数量不合法")
-        for item in result.items:
-            if not 1 <= len(item.source_asset_ids) <= 2:
-                raise AIGenerationError("AI 生成失败：明信片参考照片数量不合法")
-            if len(set(item.source_asset_ids)) != len(item.source_asset_ids):
-                raise AIGenerationError("AI 生成失败：明信片参考照片重复")
-            if any(asset_id not in allowed_asset_ids for asset_id in item.source_asset_ids):
-                raise AIGenerationError("AI 生成失败：明信片参考照片非候选照片")
-
-    with timed_stage("orchestrator_postcard_selection_model", usable_photos=len(usable)):
-        return _call_postcard_structured_model(
-            task=ark_chat_client.TASK_POSTCARD_SELECTION,
-            system_prompt=system_prompt,
-            user_text=user_text,
-            result_type=PostcardSelectionResult,
-            validate=_validate,
-            max_completion_tokens=4000,
-        )
-
-
 def create_postcard_creative_plan(
     *,
     analysis: PhotoAnalysisResult,
@@ -765,11 +754,13 @@ def create_postcard_creative_plan(
             user_text=user_text,
             image_data_urls=image_data_urls,
             temperature=0.7,
-            max_completion_tokens=6000,
+            max_completion_tokens=_postcard_creative_token_budget(len(selection.items)),
+            timeout_seconds=max(settings.ARK_TEXT_TIMEOUT_SECONDS, 240),
         )
         candidates, errors = _parse_postcard_plan_candidates(
             raw, expected_count=len(expected_sources)
         )
+        candidates = _normalize_postcard_plan_series(candidates)
         _collect_postcard_plan_validation_errors(
             candidates=candidates,
             expected_sources=expected_sources,
@@ -778,30 +769,50 @@ def create_postcard_creative_plan(
         if errors:
             data_url_by_asset = dict(zip(selected_asset_ids, image_data_urls, strict=True))
             for index in sorted(errors):
-                candidates[index] = _retry_postcard_creative_item(
-                    index=index,
-                    validation_errors=errors[index],
-                    analysis=selected_analysis,
-                    selection=selection,
-                    requirements=requirements,
-                    memory_summary=memory_summary,
-                    data_url_by_asset=data_url_by_asset,
-                    system_prompt=system_prompt,
-                )
+                try:
+                    candidates[index] = _retry_postcard_creative_item(
+                        index=index,
+                        validation_errors=errors[index],
+                        analysis=selected_analysis,
+                        selection=selection,
+                        requirements=requirements,
+                        memory_summary=memory_summary,
+                        data_url_by_asset=data_url_by_asset,
+                        system_prompt=system_prompt,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    candidates[index] = None
+                    log_event(
+                        "postcard_creative_item_retry",
+                        status="failed",
+                        item_index=index,
+                        reason=type(exc).__name__,
+                    )
 
-        result_items = [item for item in candidates if item is not None]
-        if len(result_items) != len(expected_sources):
-            raise AIGenerationError("明信片创意定向重试后仍有缺失项")
         final_errors: dict[int, list[str]] = {}
+        candidates = _normalize_postcard_plan_series(candidates)
         _collect_postcard_plan_validation_errors(
-            candidates=result_items,
+            candidates=candidates,
             expected_sources=expected_sources,
             errors=final_errors,
         )
         if final_errors:
-            details = _format_postcard_plan_errors(final_errors)
-            raise AIGenerationError(f"明信片创意定向重试后仍不合法：{details}")
+            for index in final_errors:
+                candidates[index] = None
+            log_event(
+                "postcard_creative_final_validation",
+                status="partial",
+                invalid_indices=sorted(final_errors),
+            )
+        if any(item is None for item in candidates):
+            raise PartialPostcardCreativePlanError(candidates)
+        result_items = [item for item in candidates if item is not None]
         return PostcardPlanResult(items=result_items)
+
+
+def _postcard_creative_token_budget(postcard_count: int) -> int:
+    """Reserve visible JSON space after reasoning without overbudgeting one card."""
+    return min(14000, 5200 + 1600 * max(1, postcard_count))
 
 
 def _parse_postcard_plan_candidates(
@@ -840,7 +851,12 @@ def _parse_postcard_plan_candidates(
             errors[index] = ["模型未返回该明信片创意"]
             continue
         try:
-            candidate = PostcardPlanItem.model_validate(raw_items[index])
+            raw_item = raw_items[index]
+            if isinstance(raw_item, dict):
+                # The delivery policy is fixed even if a model repeats an old
+                # local-rendering enum from prior prompt versions.
+                raw_item = {**raw_item, "text_rendering": "model_integrated"}
+            candidate = PostcardPlanItem.model_validate(raw_item)
             if candidate.emblem_style != "none" and not candidate.emblem_text.strip():
                 # An emblem is optional. Dropping an empty decorative mark is
                 # safer than inventing copy or spending a full vision retry.
@@ -857,7 +873,7 @@ def _parse_postcard_plan_candidates(
                     status="accepted",
                     item_index=index,
                 )
-            candidates.append(candidate)
+            candidates.append(_normalize_postcard_image_prompt(candidate, item_index=index))
         except ValidationError as exc:
             candidates.append(None)
             errors[index] = [_summarize_validation_error(exc)]
@@ -873,6 +889,92 @@ def _parse_postcard_plan_candidates(
     return candidates, errors
 
 
+def _normalize_postcard_image_prompt(
+    item: PostcardPlanItem, *, item_index: int,
+) -> PostcardPlanItem:
+    """Compile a safe image brief; editorial omissions do not need another model call."""
+    prompt = _remove_postcard_copy_directives(item.image_prompt.strip())
+    if len(prompt) > 360:
+        prompt = prompt[:360].rstrip("，,；;。 ") + "。"
+
+    additions: list[str] = []
+    if len(prompt) < 140:
+        additions.extend((
+            f"照片处理：{item.photo_transformation.strip()}",
+            f"核心构思：{item.design_concept.strip()}",
+            f"画面装置：{item.visual_device.strip()}",
+            f"系列线索：{item.series_motif.strip()}",
+        ))
+    expected_ratio = _POSTCARD_FORMAT_RATIOS[item.canvas_format].split()[-1]
+    if expected_ratio not in prompt:
+        additions.insert(0, f"按所选 {expected_ratio} 比例构图。")
+    normalized = prompt
+    for addition in additions:
+        if len(normalized) >= 140:
+            break
+        if addition in normalized:
+            continue
+        separator = "\n" if normalized else ""
+        if len(normalized) + len(separator) + len(addition) > 400:
+            continue
+        normalized += separator + addition
+    if normalized != item.image_prompt:
+        log_event(
+            "postcard_creative_prompt_normalized",
+            status="accepted",
+            item_index=item_index,
+            original_chars=len(item.image_prompt),
+            normalized_chars=len(normalized),
+        )
+        return item.model_copy(update={"image_prompt": normalized})
+    return item
+
+
+def _normalize_postcard_plan_series(
+    candidates: list[PostcardPlanItem | None],
+) -> list[PostcardPlanItem | None]:
+    """Normalize series metadata without turning editorial variety into a retry gate."""
+    canonical_motif = next(
+        (
+            item.series_motif.strip()
+            for item in candidates
+            if item is not None and item.series_motif.strip()
+        ),
+        "从每张原图提取轮廓与在地色彩，形成一组旅行印刷物",
+    )
+    normalized: list[PostcardPlanItem | None] = []
+    for index, item in enumerate(candidates):
+        if item is None:
+            normalized.append(None)
+            continue
+        title = item.title.strip() or "沿途所见"
+        if len(title) == 1:
+            title += "印象"
+        title = title[:10]
+        extras: list[str] = []
+        total = 0
+        for value in item.extra_texts:
+            text = value.strip()[:24]
+            if not text or total + len(text) > 36 or len(extras) == 2:
+                continue
+            extras.append(text)
+            total += len(text)
+        emblem_text = item.emblem_text.strip()[:8]
+        updates: dict[str, Any] = {
+            "series_motif": canonical_motif,
+            "title": title,
+            "extra_texts": extras,
+        }
+        if item.emblem_style == "none" or not emblem_text:
+            updates.update({"emblem_style": "none", "emblem_text": ""})
+        else:
+            updates["emblem_text"] = emblem_text
+        updated = item.model_copy(update=updates)
+        updated = _normalize_postcard_image_prompt(updated, item_index=index)
+        normalized.append(updated)
+    return normalized
+
+
 def _collect_postcard_plan_validation_errors(
     *,
     candidates: list[PostcardPlanItem | None],
@@ -880,50 +982,13 @@ def _collect_postcard_plan_validation_errors(
     errors: dict[int, list[str]],
 ) -> None:
     """Collect item-local and cross-item errors without discarding valid items."""
-    seen_titles: dict[str, int] = {}
     for index, expected in enumerate(expected_sources):
         item = candidates[index]
         if item is None:
             continue
         item_errors = _postcard_plan_item_errors(item, expected)
-        title = item.title.strip()
-        if title in seen_titles:
-            item_errors.append(f"标题与第 {seen_titles[title] + 1} 张重复")
-        else:
-            seen_titles[title] = index
         if item_errors:
             errors.setdefault(index, []).extend(item_errors)
-
-    complete = [
-        (index, item)
-        for index, item in enumerate(candidates)
-        if item is not None
-    ]
-    if complete:
-        canonical_motif = complete[0][1].series_motif.strip()
-        for index, item in complete[1:]:
-            if item.series_motif.strip() != canonical_motif:
-                errors.setdefault(index, []).append(
-                    "series_motif 必须与本系列首张完全一致："
-                    + json.dumps(canonical_motif, ensure_ascii=False)
-                )
-    if len(complete) >= 3:
-        diversity_axes = (
-            ("canvas_format", [item.canvas_format for _, item in complete], "画幅比例"),
-            ("layout_style", [item.layout_style for _, item in complete], "空间构成"),
-            (
-                "type_style.composition",
-                [item.type_style.composition for _, item in complete],
-                "字体构图",
-            ),
-        )
-        for field_name, values, label in diversity_axes:
-            if len(set(values)) == 1:
-                retry_index = complete[-1][0]
-                errors.setdefault(retry_index, []).append(
-                    f"本批明信片的{label}不能全部相同；请为本项更换 {field_name}，"
-                    f"不要继续使用 {values[-1]}"
-                )
 
 
 def _postcard_plan_item_errors(
@@ -937,69 +1002,49 @@ def _postcard_plan_item_errors(
             + json.dumps(expected_source_asset_ids, ensure_ascii=False)
         )
     title = item.title.strip()
-    if not 2 <= len(title) <= 10:
-        errors.append("标题长度必须为 2–10 个字")
-    if (
-        len(item.extra_texts) > 2
-        or any(not 1 <= len(text.strip()) <= 24 for text in item.extra_texts)
-        or sum(len(text.strip()) for text in item.extra_texts) > 36
-    ):
-        errors.append("extra_texts 必须为 0–2 条、单条 1–24 字且总长不超过 36 字")
+    if not title:
+        errors.append("标题不能为空")
     emblem_text = item.emblem_text.strip()
     if item.emblem_style == "none" and emblem_text:
         errors.append("emblem_style=none 时 emblem_text 必须为空")
     if item.emblem_style != "none" and not 1 <= len(emblem_text) <= 8:
         errors.append("启用原创徽记时 emblem_text 必须为 1–8 个字")
-    structured_fields = (
-        ("series_motif", item.series_motif, 12, 80),
-        ("design_concept", item.design_concept, 12, 160),
-        ("photo_transformation", item.photo_transformation, 20, 200),
-        ("visual_device", item.visual_device, 12, 220),
-        ("typography", item.typography, 12, 160),
-    )
-    for name, value, minimum, maximum in structured_fields:
-        if not minimum <= len(value.strip()) <= maximum:
-            errors.append(f"{name} 长度必须为 {minimum}–{maximum} 个字")
     image_prompt = item.image_prompt.strip()
-    if not 140 <= len(image_prompt) <= 400:
-        errors.append("image_prompt 长度必须为 140–400 个字")
-    expected_ratio = _POSTCARD_FORMAT_RATIOS[item.canvas_format].split()[-1]
-    if expected_ratio not in image_prompt:
-        errors.append(f"image_prompt 必须明确所选 {expected_ratio} 构图")
-    if item.text_rendering == "local_exact":
-        if not re.search(
-            r"(?:无|不要|不得|禁止|避免|严禁).{0,10}(?:可读)?文字",
-            image_prompt,
-        ):
-            errors.append("local_exact 的 image_prompt 必须明确底图无可读文字")
-        if _requests_rendered_text(image_prompt):
-            errors.append("local_exact 不得要求图片模型添加文字、标题或标志")
     approved_copy = [title, *item.extra_texts, emblem_text, image_prompt]
     if _contains_forbidden_postcard_brand(approved_copy):
         errors.append("标题、辅助文字、徽记及图片提示中不得出现固定产品品牌")
     return errors
 
 
+def _remove_no_text_instructions(value: str) -> str:
+    """Discard stale art-brief clauses that reserve copy for a local renderer."""
+    clauses = re.split(r"(?<=[。；;！!？?\n])", value)
+    forbidden = re.compile(
+        r"(?:底图|画面|最终|全图|成图)?.{0,8}(?:无可读文字|"
+        r"不出现(?:任何)?文字|不得(?:添加|出现|生成)(?:任何|可读)?文字|"
+        r"不生成文字|不绘制字形|不要文字|无文字)|"
+        r"(?:标题|文字).{0,12}由(?:后端|本地).{0,12}(?:叠加|排版|绘制)"
+    )
+    return "".join(clause for clause in clauses if not forbidden.search(clause)).strip()
+
+
+def _remove_postcard_copy_directives(value: str) -> str:
+    """Keep the art brief, but supply all exact copy in one authoritative clause."""
+    clauses = re.split(r"(?<=[。；;！!？?\n])", _remove_no_text_instructions(value))
+    copy_directive = re.compile(
+        r"(?:添加|写|绘制|呈现|出现|印上|印在|放(?:置|一个)?|保留)"
+        r".{0,18}(?:标题|文字|字样|汉字|字母|二字|中文)|"
+        r"(?:标题|文字|字样|汉字|字母|二字|中文)"
+        r".{0,18}(?:添加|写|绘制|呈现|出现|印上|印在|放)|"
+        r"(?:字样|汉字|二字|英文字母)",
+        flags=re.IGNORECASE,
+    )
+    return "".join(clause for clause in clauses if not copy_directive.search(clause)).strip()
+
+
 def _contains_forbidden_postcard_brand(values: list[str]) -> bool:
     normalized = re.sub(r"[\s._\-·]+", "", " ".join(values)).casefold()
     return any(brand in normalized for brand in _FORBIDDEN_POSTCARD_BRANDS)
-
-
-def _requests_rendered_text(value: str) -> bool:
-    """Reject positive instructions that would make the image model render copy."""
-    target = r"(?:可读文字|文字|标题|大字|竖字|邮戳|日期|地名|地点名|logo|LOGO|标志|水印)"
-    action = r"(?:添加|加入|放置|写上|印上|叠加|生成|绘制|呈现|制作|设计|保留)"
-    # Remove negative constraints first. “不得添加文字” is exactly what the
-    # image brief should say and must not be mistaken for a positive request.
-    value = re.sub(
-        rf"(?:不|不要|不得|禁止|避免|切勿|严禁|无需|无).{{0,8}}"
-        rf"(?:{action}.{{0,8}})?{target}",
-        "",
-        value,
-    )
-    return bool(
-        re.search(rf"{action}.{{0,12}}{target}|{target}.{{0,12}}{action}", value)
-    )
 
 
 def _retry_postcard_creative_item(
@@ -1052,7 +1097,7 @@ def _retry_postcard_creative_item(
                 data_url_by_asset[asset_id] for asset_id in source_asset_ids
             ],
             temperature=0,
-            max_completion_tokens=5000,
+            max_completion_tokens=7000,
         )
         candidates, parse_errors = _parse_postcard_plan_candidates(
             raw, expected_count=1
@@ -1084,110 +1129,67 @@ def _format_postcard_plan_errors(errors: dict[int, list[str]]) -> str:
     )
 
 
-def _call_postcard_structured_model(
-    *,
-    task: str,
-    system_prompt: str,
-    user_text: str,
-    result_type: type[StructuredResultT],
-    validate: Callable[[StructuredResultT], None],
-    image_data_urls: list[str] | None = None,
-    temperature: float = 0.2,
-    max_completion_tokens: int = 8000,
-) -> StructuredResultT:
-    """Parse and validate a postcard JSON response, retrying it once on error."""
-    attempt_user_text = user_text
-    for json_attempt in range(2):
-        raw = ark_chat_client.chat_json(
-            task=task,
-            system_prompt=system_prompt,
-            user_text=attempt_user_text,
-            image_data_urls=image_data_urls,
-            temperature=temperature,
-            max_completion_tokens=max_completion_tokens,
-        )
-        try:
-            result = output_parser.parse_model_json(raw, result_type)
-            validate(result)
-            return result
-        except AIGenerationError as exc:
-            if json_attempt == 1:
-                raise
-            log_event(
-                "postcard_structured_json_retry",
-                status="retry",
-                detail_task=task,
-                reason=type(exc).__name__,
-            )
-            attempt_user_text = (
-                user_text
-                + "\n\n【返回纠错】上一次输出未通过 JSON 结构或业务字段校验。"
-                f"具体错误：{exc}。请重新检查所有字段，只输出完全符合系统要求的 JSON 对象。"
-            )
-    raise AIGenerationError("AI 生成失败：明信片结构化结果无效")
-
-
-def draft_report(
-    *,
-    analysis: PhotoAnalysisResult,
-    requirements: str,
-    memory_summary: str,
-) -> ReportDraftResult:
-    """Report draft → ReportDraftResult."""
-    system_prompt = load_prompt("report_system.md")
-    user_text = context_builder.build_report_draft_user_text(
-        analysis=analysis,
-        requirements=requirements,
-        memory_summary=memory_summary,
-    )
-    with timed_stage("orchestrator_report_model"):
-        raw = ark_chat_client.chat_json(
-            task=ark_chat_client.TASK_REPORT_DRAFT,
-            system_prompt=system_prompt,
-            user_text=user_text,
-        )
-        return output_parser.parse_model_json(raw, ReportDraftResult)
-
-
 def draft_report_copy(
     *,
-    analysis: PhotoAnalysisResult,
-    base_profile: TravelProfileData,
+    brief: dict[str, Any],
     requirements: str,
-) -> ReportCopyResult:
-    """Write only the short editorial layer; facts and scores stay deterministic."""
+    validate: Callable[[ReportCopyResult], dict[str, str]],
+) -> tuple[ReportCopyResult, dict[str, str]]:
+    """Write the editorial layer over the computed 旅格.
+
+    Returns the copy plus the fields that still fail validation after one
+    targeted retry; the caller keeps computed copy for those fields only.
+    """
     system_prompt = load_prompt("report_system.md")
     user_text = context_builder.build_report_copy_user_text(
-        analysis=analysis,
-        base_profile=base_profile,
-        requirements=requirements,
+        brief=brief, requirements=requirements,
     )
     attempt_text = user_text
+    rejected: tuple[ReportCopyResult, dict[str, str]] | None = None
     for attempt in range(2):
         with timed_stage("orchestrator_report_copy_model", attempt=attempt + 1):
             raw = ark_chat_client.chat_json(
                 task=ark_chat_client.TASK_REPORT_DRAFT,
                 system_prompt=system_prompt,
                 user_text=attempt_text,
-                temperature=0.65 if attempt == 0 else 0,
+                temperature=0.85 if attempt == 0 else 0.4,
                 max_completion_tokens=6000,
             )
         try:
-            return output_parser.parse_model_json(raw, ReportCopyResult)
+            copy = output_parser.parse_model_json(raw, ReportCopyResult)
         except AIGenerationError as exc:
             if attempt == 1:
+                if rejected is not None:
+                    return rejected
                 raise
-            log_event(
-                "report_copy_json_retry",
-                status="retry",
-                reason=type(exc).__name__,
+            detail = (
+                _summarize_validation_error(exc.__cause__)
+                if isinstance(exc.__cause__, ValidationError)
+                else exc.message
             )
+            log_event("report_copy_json_retry", status="retry", reason=detail[:200])
             attempt_text = (
                 user_text
-                + "\n\n【返回纠错】上一次输出没有通过 ReportCopyResult 字段或长度校验。"
-                "请缩短并逐项检查，只输出 JSON。"
+                + "\n\n【返回纠错】上一次输出没有通过 ReportCopyResult 校验："
+                + detail
+                + "。请逐项核对字段与字数，只输出 JSON。"
             )
-    raise AIGenerationError("旅行人格核心文案生成失败")
+            continue
+        issues = validate(copy)
+        if not issues:
+            return copy, {}
+        rejected = (copy, issues)
+        if attempt == 1:
+            break
+        log_event("report_copy_semantic_retry", status="retry", fields=sorted(issues))
+        attempt_text = (
+            user_text
+            + "\n\n【返回纠错】以下字段没有通过校验，请只改写这些字段、其余字段保持原样，输出完整 JSON：\n"
+            + "\n".join(f"- {field}：{reason}" for field, reason in issues.items())
+            + "\n上一次输出：" + copy.model_dump_json()
+        )
+    assert rejected is not None
+    return rejected
 
 
 def render_postcard_image(
@@ -1205,7 +1207,6 @@ def render_postcard_image(
     visual_medium: str,
     palette_strategy: str,
     title_placement: str,
-    text_rendering: str,
     title: str,
     extra_texts: list[str],
     emblem_style: str,
@@ -1226,7 +1227,6 @@ def render_postcard_image(
         visual_medium=visual_medium,
         palette_strategy=palette_strategy,
         title_placement=title_placement,
-        text_rendering=text_rendering,
         title=title,
         extra_texts=extra_texts,
         emblem_style=emblem_style,
@@ -1241,7 +1241,7 @@ def render_postcard_image(
         canvas_format=canvas_format,
         layout_style=layout_style,
         title_placement=title_placement,
-        text_rendering=text_rendering,
+        text_rendering="model_integrated",
     )
     image_size = _POSTCARD_IMAGE_SIZES.get(canvas_format, settings.ARK_IMAGE_SIZE)
     try:
@@ -1250,14 +1250,18 @@ def render_postcard_image(
             image_data_urls=image_data_urls,
             size=image_size,
         )
-    except ImageInputPolicyError:
+    except ImageInputPolicyError as exc:
+        # Rephrasing can address a rejected text prompt. It cannot change a
+        # provider decision about the uploaded photo, so repeating that request
+        # only spends latency and quota before reaching the same result.
+        if exc.input_kind != "text":
+            raise
         sanitized_prompt = _sanitized_postcard_image_prompt(
             canvas_format=canvas_format,
             title=title,
             extra_texts=extra_texts,
             emblem_style=emblem_style,
             emblem_text=emblem_text,
-            text_rendering=text_rendering,
         )
         log_event(
             "postcard_image_input_policy_retry",
@@ -1284,12 +1288,10 @@ def _sanitized_postcard_image_prompt(
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
-    text_rendering: str,
 ) -> str:
     """Return a minimal fallback prompt for one input-policy retry."""
     format_label = _POSTCARD_FORMAT_RATIOS.get(canvas_format, "横版 3:2")
     text_instruction = _postcard_text_instruction(
-        text_rendering=text_rendering,
         title=title,
         extra_texts=extra_texts,
         emblem_style=emblem_style,
@@ -1319,13 +1321,17 @@ def _compose_postcard_image_prompt(
     visual_medium: str,
     palette_strategy: str,
     title_placement: str,
-    text_rendering: str,
     title: str,
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
 ) -> str:
     """Compose the actual Seedream art-direction sheet from validated fields."""
+    prompt = _remove_postcard_copy_directives(prompt)
+    design_concept = _remove_postcard_copy_directives(design_concept)
+    photo_transformation = _remove_postcard_copy_directives(photo_transformation)
+    visual_device = _remove_postcard_copy_directives(visual_device)
+    typography = _remove_postcard_copy_directives(typography)
     prompt = _without_emblem_directives(prompt) if emblem_style == "none" else prompt
     visual_device = (
         _without_emblem_directives(visual_device)
@@ -1372,7 +1378,6 @@ def _compose_postcard_image_prompt(
         f"{type_style.scale}，旋转 {type_style.rotation_degrees} 度"
     )
     text_instruction = _postcard_text_instruction(
-        text_rendering=text_rendering,
         title=title,
         extra_texts=extra_texts,
         emblem_style=emblem_style,
@@ -1386,12 +1391,9 @@ def _compose_postcard_image_prompt(
         + f"\n核心构思：{design_concept.strip()}"
         + f"\n照片变换：{photo_transformation.strip()}"
         + f"\n视觉装置：{visual_device.strip()}"
-        + (
-            f"\n后端排版参考：{typography.strip()}；执行标记为 {type_direction}。"
-            "这里只用于安排主体与留白，图片模型不得绘制任何字形。"
-            if text_rendering == "local_exact"
-            else f"\n字体方向：{typography.strip()}；执行标记为 {type_direction}。"
-        )
+        + f"\n字体方向：{typography.strip()}；执行标记为 {type_direction}。"
+        + "图像模型直接绘制全部批准文字。可按原图采用花哨夸张、优雅克制或高对比冲击的字形，"
+          "让字形成为画面设计的一部分，所有笔画必须完整可辨。"
         + f"\n执行简报：{prompt.strip()}"
         + f"\n文字与徽记：{text_instruction}"
         + f"\n输出 {format_label} 单张成图；Image 1 是唯一事实来源。"
@@ -1400,19 +1402,12 @@ def _compose_postcard_image_prompt(
 
 def _postcard_text_instruction(
     *,
-    text_rendering: str,
     title: str,
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
     placement: str,
 ) -> str:
-    if text_rendering != "model_integrated":
-        return (
-            f"在{placement}形成自然排版通道，但底图不得出现任何可读文字、字母、"
-            "数字、Logo、徽记、水印、邮戳或日期；后端将精确排版"
-        )
-
     approved_texts = [title.strip(), *(text.strip() for text in extra_texts)]
     approved_texts = [text for text in approved_texts if text]
     copy_text = json.dumps(approved_texts, ensure_ascii=False)
@@ -1423,7 +1418,7 @@ def _postcard_text_instruction(
         else "；不加入徽记"
     )
     return (
-        f"在{placement}按指定字体关系融入且逐字准确呈现 {copy_text}"
+        f"以{placement}为构图锚点，在成图中直接绘制并逐字准确呈现 {copy_text}"
         f"{emblem_instruction}；不得增加列表之外的随机文字、固定品牌眉题、"
         "第三方商标、日期或水印"
     )
@@ -1470,19 +1465,20 @@ def review_postcard_artwork(
             max_completion_tokens=5000,
         )
     result = output_parser.parse_model_json(raw, PostcardCritiqueResult)
-    threshold = max(1, min(10, settings.POSTCARD_AESTHETIC_MIN_SCORE))
-    scores = (
-        result.fidelity_score,
-        result.artistry_score,
-        result.composition_score,
-        result.typography_score,
-        result.finish_score,
-    )
-    passes_gate = min(scores) >= threshold and result.template_risk_score <= 4
-    if not passes_gate:
-        result.approved = False
-        if result.repair_target == "none":
-            result.repair_target = "image"
+    # The critic proposes a diagnosis; this bounded policy makes the delivery
+    # decision. A single 6/10 aesthetic score must not erase an otherwise sound
+    # generated card, while an objective defect must never be averaged away.
+    result.approved = postcard_review_is_acceptable(result)
+    if result.approved:
+        result.repair_target = "none"
+        result.typography_adjustment = "none"
+    elif result.repair_target == "none":
+        result.repair_target = (
+            "typography"
+            if min(result.typography_score, result.finish_score) < 5
+            and result.fidelity_score >= 6
+            else "image"
+        )
     log_event(
         "postcard_aesthetic_review",
         status="approved" if result.approved else "repair",
@@ -1493,10 +1489,61 @@ def review_postcard_artwork(
         typography_score=result.typography_score,
         finish_score=result.finish_score,
         template_risk_score=result.template_risk_score,
+        blocking_issues=result.blocking_issues,
         repair_target=result.repair_target,
         typography_adjustment=result.typography_adjustment,
     )
     return result
+
+
+def _postcard_critique_score(result: Any, field: str) -> int:
+    """Read one score while keeping lightweight test doubles compatible."""
+    value = getattr(result, field, None)
+    if isinstance(value, (int, float)):
+        return max(0, min(10, int(value)))
+    if field == "template_risk_score":
+        return 0 if bool(getattr(result, "approved", False)) else 10
+    return 10 if bool(getattr(result, "approved", False)) else 0
+
+
+def postcard_review_is_blocking(result: Any) -> bool:
+    """Return whether an objective defect makes this candidate undeliverable."""
+    if list(getattr(result, "blocking_issues", None) or []):
+        return True
+    # Scores only become emergency backstops at clearly broken levels. Normal
+    # 5–6 point variation is an optimisation signal, not a destruction signal.
+    return (
+        _postcard_critique_score(result, "fidelity_score") <= 4
+        or _postcard_critique_score(result, "typography_score") <= 3
+        or _postcard_critique_score(result, "finish_score") <= 3
+    )
+
+
+def postcard_review_quality_score(result: Any) -> float:
+    """Comparable 0–10 score used to decide whether a repair is needed."""
+    weighted = (
+        0.30 * _postcard_critique_score(result, "fidelity_score")
+        + 0.15 * _postcard_critique_score(result, "artistry_score")
+        + 0.20 * _postcard_critique_score(result, "composition_score")
+        + 0.20 * _postcard_critique_score(result, "typography_score")
+        + 0.15 * _postcard_critique_score(result, "finish_score")
+    )
+    risk = _postcard_critique_score(result, "template_risk_score")
+    return round(weighted - max(0, risk - 4) * 0.15, 3)
+
+
+def postcard_review_is_acceptable(result: Any) -> bool:
+    """Accept complete, usable work without requiring five identical scores."""
+    if postcard_review_is_blocking(result):
+        return False
+    return (
+        _postcard_critique_score(result, "fidelity_score") >= 6
+        and _postcard_critique_score(result, "composition_score") >= 5
+        and _postcard_critique_score(result, "typography_score") >= 5
+        and _postcard_critique_score(result, "finish_score") >= 5
+        and _postcard_critique_score(result, "template_risk_score") <= 6
+        and postcard_review_quality_score(result) >= 6.4
+    )
 
 
 def repair_postcard_artwork(
@@ -1514,7 +1561,6 @@ def repair_postcard_artwork(
         "bottom_right": "右下区域",
     }.get(item.title_placement, "构图选定区域")
     text_instruction = _postcard_text_instruction(
-        text_rendering=item.text_rendering,
         title=item.title,
         extra_texts=item.extra_texts,
         emblem_style=item.emblem_style,
@@ -1522,8 +1568,6 @@ def repair_postcard_artwork(
         placement=placement,
     )
     repair_instruction = critique.repair_instruction.strip() or "修复评审指出的主要完成度问题"
-    if item.text_rendering == "local_exact":
-        repair_instruction = _image_only_repair_instruction(repair_instruction)
     repair_visual_device = (
         _without_emblem_directives(item.visual_device)
         if item.emblem_style == "none"
@@ -1577,21 +1621,6 @@ def _without_emblem_directives(value: str) -> str:
         if not re.search(r"徽记|印章|标志|logo", clause, flags=re.IGNORECASE)
     ]
     return "".join(kept).strip() or "不加入任何徽记或标志"
-
-
-def _image_only_repair_instruction(value: str) -> str:
-    clauses = re.split(r"[；;。\n]+", value)
-    kept = [
-        clause.strip()
-        for clause in clauses
-        if clause.strip()
-        and not re.search(
-            r"文字|标题|字体|字号|字重|排版|文案|可读|徽记|印章|标志|logo",
-            clause,
-            flags=re.IGNORECASE,
-        )
-    ]
-    return "；".join(kept) or "只修复底图的保真、构图、材质与伪影问题，并保持底图完全无字"
 
 
 def propose_memory_update(
@@ -1887,6 +1916,7 @@ def _plan_with_tools(
     fact_registry: dict[str, dict[str, Any]] = {}
     retained_facts: dict[str, dict[str, Any]] = {}
     result_cache: dict[str, dict[str, Any]] = {}
+    unavailable_external_tools: dict[str, str] = {}
     remaining_queries: list[str] = []
     external_calls = 0
     planning_tools = tool_specs.planning_tools_for_model(planning_model)
@@ -1959,7 +1989,9 @@ def _plan_with_tools(
         )
         turn = ark_chat_client.chat_messages(
             messages=messages,
-            tools=planning_tools,
+            tools=_available_planning_tools(
+                planning_tools, set(unavailable_external_tools)
+            ),
             stage="planning_research",
             max_completion_tokens=_MAX_GENERATION_TOKENS,
             planning_model=planning_model,
@@ -2005,16 +2037,21 @@ def _plan_with_tools(
             )
             continue
 
-        external_in_turn = any(
-            tc.name in allowed_external_tool_names for tc in turn.tool_calls
-        )
         messages.append(_assistant_history_message(turn, planning_model))
         parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in turn.tool_calls]
+        external_in_turn = any(
+            tc.name in allowed_external_tool_names
+            and tc.name not in unavailable_external_tools
+            for tc, _ in parsed_calls
+        )
         allowed_external_ids: set[str] = set()
         batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
         new_request_keys: set[str] = set()
         for tc, args in parsed_calls:
             if tc.name not in allowed_external_tool_names:
+                continue
+            if tc.name in unavailable_external_tools:
+                allowed_external_ids.add(tc.id)
                 continue
             cache_key = _planning_tool_cache_key(tc.name, args)
             if cache_key in result_cache or cache_key in batch_requests:
@@ -2138,6 +2175,7 @@ def _plan_with_tools(
                             scope=scope,
                             remaining_queries=remaining_queries,
                             fact_registry=fact_registry,
+                            unavailable_tool_names=set(unavailable_external_tools),
                         )
                         if finish_gaps and round_idx + 1 < max_rounds:
                             remaining_queries = list(
@@ -2163,7 +2201,12 @@ def _plan_with_tools(
                         "message": f"研究总结参数不合法：{exc.errors()[:1]}",
                     }
             elif tc.name in allowed_external_tool_names:
-                if tc.id not in allowed_external_ids:
+                if tc.name in unavailable_external_tools:
+                    cache_hit = True
+                    result = _circuit_open_tool_result(
+                        tc.name, unavailable_external_tools[tc.name]
+                    )
+                elif tc.id not in allowed_external_ids:
                     result = {
                         "tool": tc.name,
                         "status": "error",
@@ -2189,6 +2232,25 @@ def _plan_with_tools(
                             )
                         if _cacheable_tool_result(result):
                             result_cache[cache_key] = deepcopy(result)
+                        disabled = _terminal_tool_failure_scope(tc.name, result)
+                        if disabled:
+                            reason = str(
+                                result.get("error_code")
+                                or result.get("status")
+                                or "provider_unavailable"
+                            )
+                            for disabled_name in disabled:
+                                unavailable_external_tools.setdefault(
+                                    disabled_name, reason
+                                )
+                            log_event(
+                                "planning_provider_circuit",
+                                status="opened",
+                                failed_tool=tc.name,
+                                disabled_tools=sorted(disabled),
+                                reason=reason,
+                                round=round_idx + 1,
+                            )
             else:
                 result = {
                     "tool": tc.name,
@@ -2259,6 +2321,7 @@ def _plan_with_tools(
                 scope=scope,
                 remaining_queries=remaining_queries,
                 fact_registry=fact_registry,
+                unavailable_tool_names=set(unavailable_external_tools),
             )
             if (
                 critical_gaps
@@ -2724,10 +2787,11 @@ def _research_coverage_kwargs(
         if _tool_result_has_usable_fact(fact)
     }
     transport_tools = {
-        tool_specs.TOOL_QUERY_RAIL,
+        tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
         tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+        tool_specs.TOOL_SEARCH_TRAIN_TICKETS,
     }
     transport_query_keys = {
         _planning_tool_cache_key(
@@ -2745,15 +2809,16 @@ def _research_coverage_kwargs(
     else:
         has_hotel = _has_hotel_fact_for_city("", fact_registry)
     flight_tools = {
+        tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
         tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
     }
     return {
         "transport_query_count": len(transport_query_keys),
         "destination_count": len(destination_list),
         "has_flight": bool(tool_names & flight_tools),
-        "has_rail": tool_specs.TOOL_QUERY_RAIL in tool_names,
+        "has_rail": tool_specs.TOOL_SEARCH_TRAIN_TICKETS in tool_names,
         "has_route": tool_specs.TOOL_AMAP_ROUTE in tool_names,
         "has_poi_around": tool_specs.TOOL_AMAP_POI_AROUND in tool_names,
         "has_poi_search": bool(
@@ -2772,6 +2837,7 @@ def _critical_research_gaps(
     scope: dict[str, Any] | None,
     remaining_queries: list[str],
     fact_registry: dict[str, dict[str, Any]],
+    unavailable_tool_names: set[str] | None = None,
 ) -> list[str]:
     """Return only gaps important enough to extend research past round five."""
     if scope is None:
@@ -2783,11 +2849,14 @@ def _critical_research_gaps(
         if _tool_result_has_usable_fact(fact)
     }
     transport_tools = {
-        tool_specs.TOOL_QUERY_RAIL,
+        tool_specs.TOOL_SEARCH_FLIGHTS_BY_DEP_ARR,
+        tool_specs.TOOL_GET_FLIGHT_TRANSFER_INFO,
         tool_specs.TOOL_SEARCH_FLIGHT_ITINERARIES,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRANSFER,
-        tool_specs.TOOL_SEARCH_FLIGHT_TRAIN_TRANSFER,
+        tool_specs.TOOL_GET_FLIGHT_TRAIN_TRANSFER_INFO,
+        tool_specs.TOOL_SEARCH_TRAIN_TICKETS,
     }
+    unavailable = unavailable_tool_names or set()
+    available_transport_tools = transport_tools - unavailable
     transport_query_keys = {
         _planning_tool_cache_key(
             str(fact.get("tool") or ""),
@@ -2802,15 +2871,24 @@ def _critical_research_gaps(
         str(item) for item in destinations if str(item).strip()
     ] if isinstance(destinations, list) else []
     destination_count = len(destination_list)
-    if scope.get("needsTransport") and not transport_query_keys:
+    if (
+        scope.get("needsTransport")
+        and available_transport_tools
+        and not transport_query_keys
+    ):
         gaps.append("去返程或跨城大交通事实缺失")
-    elif len(transport_query_keys) < destination_count + 1:
+    elif available_transport_tools and len(transport_query_keys) < destination_count + 1:
         gaps.append(
             f"多城转场交通覆盖不足：{destination_count} 个目的地至少需要 "
             f"{destination_count + 1} 段大交通查询，目前只有 {len(transport_query_keys)} 段"
         )
 
-    if scope.get("needsHotel"):
+    hotel_tools = {
+        tool_specs.TOOL_AMAP_POI_SEARCH,
+        tool_specs.TOOL_AMAP_POI_AROUND,
+        tool_specs.TOOL_AMAP_POI_DETAIL,
+    }
+    if scope.get("needsHotel") and hotel_tools - unavailable:
         missing_hotel_cities = [
             city
             for city in destination_list
@@ -2825,7 +2903,10 @@ def _critical_research_gaps(
         ):
             gaps.append("过夜城市的酒店落点缺失")
 
-    if scope.get("needsTransport"):
+    if (
+        scope.get("needsTransport")
+        and tool_specs.TOOL_AMAP_ROUTE not in unavailable
+    ):
         route_facts = [
             fact
             for fact in fact_registry.values()
@@ -2865,10 +2946,25 @@ def _critical_research_gaps(
         "接驳",
     )
     coverage = _research_coverage_kwargs(scope, fact_registry)
+    flight_tools = transport_tools - {tool_specs.TOOL_SEARCH_TRAIN_TICKETS}
+
+    def query_source_is_available(query: str) -> bool:
+        lowered = query.lower()
+        if any(marker in lowered for marker in ("铁路", "火车", "车次", "高铁")):
+            return tool_specs.TOOL_SEARCH_TRAIN_TICKETS not in unavailable
+        if any(marker in lowered for marker in ("航班", "飞机", "机场")):
+            return bool(flight_tools - unavailable)
+        if any(marker in lowered for marker in ("酒店", "住宿", "路线", "接驳")):
+            return bool(hotel_tools - unavailable) or (
+                tool_specs.TOOL_AMAP_ROUTE not in unavailable
+            )
+        return True
+
     critical_remaining = [
         query
         for query in remaining_queries
         if any(marker in query.lower() for marker in critical_markers)
+        and query_source_is_available(query)
         and not planning_research_state.remaining_query_is_covered(
             query,
             fact_registry=fact_registry,
@@ -3069,13 +3165,17 @@ def _select_planning_facts_for_final(
 ) -> dict[str, dict[str, Any]]:
     """Bound unselected research results while preserving transport first."""
     tool_priority = {
-        "searchFlightItineraries": 0,
-        "query_rail_tickets": 1,
-        "amap_weather_range": 2,
-        "amap_route": 3,
-        "amap_poi_detail": 4,
-        "amap_poi_search": 5,
-        "amap_poi_around": 6,
+        "searchFlightsByDepArr": 0,
+        "getFlightTransferInfo": 1,
+        "searchFlightItineraries": 2,
+        "getFlightAndTrainTransferInfo": 3,
+        "searchTrainTickets": 4,
+        "searchTrainStations": 5,
+        "amap_weather_range": 6,
+        "amap_route": 7,
+        "amap_poi_detail": 8,
+        "amap_poi_search": 9,
+        "amap_poi_around": 10,
     }
     ordered = sorted(
         facts.items(),
@@ -3296,11 +3396,28 @@ def _itinerary_problems(
     neighbour is as unusable as one citing a flight that does not exist, so both
     block; only the day-density rules are advisory.
     """
-    problems = list(_time_window_problems(itinerary, user_text))
-    problems.extend(_schedule_overlap_problems(itinerary))
-    problems.extend(
-        planning_feasibility.find_problem_details(itinerary, retained_facts)
+    fact_problems = planning_feasibility.find_problem_details(
+        itinerary, retained_facts
     )
+    deferred_dates = {
+        problem.date
+        for problem in fact_problems
+        if problem.resolution == "defer" and problem.date
+    }
+    problems: list[planning_feasibility.Problem] = []
+    for problem in _time_window_problems(itinerary, user_text):
+        if problem.date in deferred_dates:
+            problem = planning_feasibility.Problem(
+                message=problem.message,
+                blocking=problem.blocking,
+                date=problem.date,
+                schedule_id=problem.schedule_id,
+                resolution="defer",
+            )
+        problems.append(problem)
+    problems.extend(_schedule_overlap_problems(itinerary))
+    problems.extend(planning_feasibility.lodging_consistency_problems(itinerary))
+    problems.extend(fact_problems)
     seen: set[str] = set()
     unique: list[planning_feasibility.Problem] = []
     for problem in problems:
@@ -3338,21 +3455,37 @@ def _repair_itinerary_violations(
             fixes=autofixed[:30],
             planning_model=planning_model,
         )
-    problems = _itinerary_violations(current, user_text, retained_facts)
-    if not problems:
+    current, deferred_dates = planning_feasibility.defer_unanchored_intercity_times(
+        current, retained_facts
+    )
+    if deferred_dates:
+        log_event(
+            "planning_feasibility_deferred",
+            status="applied",
+            dates=deferred_dates,
+            planning_model=planning_model,
+        )
+    details = _itinerary_problems(current, user_text, retained_facts)
+    repairable = [
+        problem for problem in details if problem.resolution == "model_repair"
+    ]
+    if not details:
         return current
     for attempt in range(1, _MAX_FEASIBILITY_REPAIR_ROUNDS + 1):
+        if not repairable:
+            break
+        problem_messages = [problem.message for problem in repairable]
         planning_progress.report(
             "verifying",
             repair_round=attempt,
-            detail=f"正在修正 {len(problems)} 处与事实不符之处",
+            detail=f"正在修正 {len(repairable)} 处可由模型解决的事实矛盾",
         )
         log_event(
             "planning_feasibility_repair",
             status="start",
             attempt=attempt,
-            problem_count=len(problems),
-            problems=problems[:20],
+            problem_count=len(repairable),
+            problems=problem_messages[:20],
             planning_model=planning_model,
         )
         repaired = _request_itinerary_repair(
@@ -3360,32 +3493,46 @@ def _repair_itinerary_violations(
             user_text=user_text,
             itinerary=current,
             retained_facts=retained_facts,
-            problems=problems,
+            problems=problem_messages,
             planning_model=planning_model,
             attempt=attempt,
         )
         if repaired is None:
             break
-        remaining = _itinerary_violations(repaired, user_text, retained_facts)
-        resolved = len(problems) - len(remaining)
+        repaired, _ = planning_feasibility.defer_unanchored_intercity_times(
+            repaired, retained_facts
+        )
+        remaining_details = _itinerary_problems(
+            repaired, user_text, retained_facts
+        )
+        remaining = [
+            problem
+            for problem in remaining_details
+            if problem.resolution == "model_repair"
+        ]
+        resolved = len(repairable) - len(remaining)
         log_event(
             "planning_feasibility_repair",
             status="success" if not remaining else "partial",
             attempt=attempt,
             resolved_count=max(0, resolved),
             remaining_count=len(remaining),
-            remaining_problems=remaining[:20],
+            remaining_problems=[problem.message for problem in remaining][:20],
             planning_model=planning_model,
         )
         current = repaired
         if not remaining:
-            return current
-        if len(remaining) >= len(problems):
+            break
+        if len(remaining) >= len(repairable):
             # No forward progress; a further identical request would not help.
             break
-        problems = remaining
+        repairable = remaining
     unresolved = _itinerary_problems(current, user_text, retained_facts)
-    blocking = [problem for problem in unresolved if problem.blocking]
+    blocking = [
+        problem
+        for problem in unresolved
+        if problem.blocking and problem.resolution != "advisory"
+    ]
     if not unresolved:
         return current
     # A plan that survives repair with a row we cannot vouch for is still worth
@@ -3481,9 +3628,6 @@ def _generate_itinerary_from_research(
     stage: str,
     planning_model: PlanningModel,
 ) -> ItineraryData:
-    reference_fact_rule = "铁路参考事实标 reference。"
-    if planning_model in DEEPSEEK_PLANNING_MODELS:
-        reference_fact_rule = "飞友航班/中转与铁路参考事实标 reference。"
     final_facts = _compact_planning_facts(retained_facts)
     compact_user = (
         f"{user_text}\n\n【模型已声明的旅行范围】\n"
@@ -3492,12 +3636,12 @@ def _generate_itinerary_from_research(
         f"【研究结束摘要】\n{json.dumps(research_summary, ensure_ascii=False)}\n\n"
         "工具已关闭。工具事实已去除路线折线和供应商原始报文，但 fact_id 与规划所需字段完整保留。"
         "现在只输出完整 ItineraryData JSON。新增字段可选；使用事实的日程必须填写"
-        " fact_refs，只有 status=ok 的高德事实可标 verified，"
-        + reference_fact_rule
-        + " transport_mode 只能是 driving/transit/walking/bicycling 或 null；飞机、铁路等大交通写入 transport，transport_mode=null。"
+        " fact_refs；所有 status=ok 的工具结果均作为事实并标 verified，"
+        "没有成功工具事实的内容标 unverified。"
+        " transport_mode 只能是 driving/transit/walking/bicycling 或 null；飞机、铁路等大交通写入 transport，transport_mode=null。"
         "用户明确的日期与时段是不可改写的硬约束：早上须在 06:00–11:59 出发，"
         "傍晚须在 17:00–19:30 出发，晚上须在 18:00 以后出发；没有已核验班次时，"
-        "只能在原时间窗内给 reference 方案，不得用其他时段替代。"
+        "只能保留原时间窗并标 unverified，不得用其他时段替代。"
         "同一天任一日程的 start_time 不得早于上一日程的 end_time，禁止时间重叠；"
         "跨夜大交通允许 end_time 钟点早于 start_time，表示次日到达，该条必须挂在出发日且为当天最后一项；"
         "不要为到达日新增行程天，除非用户确认的日期已包含到达日。"
@@ -3741,173 +3885,6 @@ def _set_json_path(document: dict[str, Any], path: list[Any], value: Any) -> Non
         current[leaf] = value
         return
     raise ValueError("patch leaf path is invalid")
-
-
-def _repair_tool_final_json(
-    *,
-    messages: list[dict[str, Any]],
-    invalid_content: str,
-    parse_error: AIGenerationError,
-    execute_tool: ToolExecutor,
-    total_calls: int,
-) -> ItineraryData:
-    """Try one tool-capable targeted repair, then one bounded plain fallback."""
-    first_detail = _model_output_error_detail(parse_error, invalid_content)
-    messages.append({"role": "assistant", "content": invalid_content})
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "上一次最终 ItineraryData JSON 无法解析。请重点修复以下错误，"
-                "保留已有工具事实和行程内容；如确有必要可继续调用工具，否则只输出"
-                "修正后的完整 JSON。\n"
-                f"【错误诊断】{first_detail}"
-            ),
-        }
-    )
-    log_event(
-        "planning_json_repair",
-        status="start",
-        path="function_calling",
-        tools_enabled=True,
-        timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
-        error_detail=first_detail,
-    )
-
-    try:
-        repair = ark_chat_client.chat_messages(
-            messages=messages,
-            tools=(
-                tool_specs.PLANNING_TOOLS
-                if total_calls < _MAX_TOOL_CALLS_TOTAL
-                else None
-            ),
-            temperature=0.0,
-            max_completion_tokens=_MAX_GENERATION_TOKENS,
-            timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
-            max_attempts=1,
-        )
-        if repair.tool_calls:
-            repair = _execute_repair_tools_and_finalize(
-                messages=messages,
-                repair=repair,
-                execute_tool=execute_tool,
-                total_calls=total_calls,
-            )
-        if not repair.content:
-            raise AIGenerationError("JSON 修复未返回内容")
-        log_event(
-            "planning_model_response_summary",
-            status="ready_to_parse",
-            path="function_calling_repair",
-            content_chars=len(repair.content),
-            content_excerpt=_excerpt(repair.content),
-        )
-        try:
-            with timed_stage(
-                "planning_parse_model_json", path="function_calling_repair"
-            ):
-                return output_parser.parse_model_json(repair.content, ItineraryData)
-        except AIGenerationError as exc:
-            second_detail = _model_output_error_detail(exc, repair.content)
-            messages.append({"role": "assistant", "content": repair.content})
-            return _plain_fallback_with_tool_history(messages, second_detail)
-    except _PlanningFallbackExhausted:
-        raise
-    except AIGenerationError as exc:
-        return _plain_fallback_with_tool_history(
-            messages, _model_output_error_detail(exc, "")
-        )
-
-
-def _execute_repair_tools_and_finalize(
-    *,
-    messages: list[dict[str, Any]],
-    repair: ark_chat_client.ChatTurn,
-    execute_tool: ToolExecutor,
-    total_calls: int,
-) -> ark_chat_client.ChatTurn:
-    """Execute tools requested by the single repair attempt, then force JSON."""
-    remaining_calls = max(0, _MAX_TOOL_CALLS_TOTAL - total_calls)
-    executable_calls = repair.tool_calls[:remaining_calls]
-    messages.append(
-        {
-            "role": "assistant",
-            "content": repair.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": tc.arguments},
-                }
-                for tc in executable_calls
-            ],
-        }
-    )
-    parsed_calls = [(tc, _safe_json_args(tc.arguments)) for tc in executable_calls]
-    batch_requests: dict[str, tuple[str, dict[str, Any]]] = {}
-    for tc, args in parsed_calls:
-        cache_key = _planning_tool_cache_key(tc.name, args)
-        batch_requests.setdefault(cache_key, (tc.name, args))
-    batch_results = _execute_external_batch(batch_requests, execute_tool)
-    for offset, (tc, args) in enumerate(parsed_calls, start=1):
-        log_event(
-            "planning_execute_tool",
-            status="start",
-            tool_name=tc.name,
-            arguments=args,
-            total_calls=total_calls + offset,
-            source="json_repair",
-        )
-        result = deepcopy(
-            batch_results[_planning_tool_cache_key(tc.name, args)]
-        )
-        log_event(
-            "planning_execute_tool",
-            status=result.get("status", "unknown"),
-            tool_name=tc.name,
-            arguments=args,
-            result=result,
-            source="json_repair",
-        )
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": json.dumps(
-                    _compact_planning_fact_value(result),
-                    ensure_ascii=False,
-                ),
-            }
-        )
-    if len(executable_calls) < len(repair.tool_calls):
-        messages.append(
-            {
-                "role": "user",
-                "content": "工具调用已达到总上限，请使用已有事实修复并输出完整 JSON。",
-            }
-        )
-    else:
-        messages.append(
-            {
-                "role": "user",
-                "content": "请根据刚返回的工具事实完成修复，现在只输出完整合法的 ItineraryData JSON。",
-            }
-        )
-    log_event(
-        "planning_json_repair",
-        status="finalize",
-        tools_executed=len(executable_calls),
-        timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
-    )
-    return ark_chat_client.chat_messages(
-        messages=messages,
-        tools=None,
-        temperature=0.0,
-        max_completion_tokens=_MAX_GENERATION_TOKENS,
-        timeout_seconds=_JSON_REPAIR_TIMEOUT_SECONDS,
-        max_attempts=1,
-    )
 
 
 def _plain_fallback_with_tool_history(

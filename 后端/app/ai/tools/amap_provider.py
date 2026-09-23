@@ -54,6 +54,9 @@ _ROUTE_PATHS = {
 }
 _AMAP_NEXT_REQUEST_AT: dict[str, float] = defaultdict(float)
 _AMAP_RATE_LOCK = threading.Lock()
+_AMAP_QUOTA_LOCK = threading.Lock()
+_AMAP_QUOTA_PAUSE_UNTIL = 0.0
+_AMAP_QUOTA_PAUSE_SECONDS = 30.0
 _CITY_HINTS = [
     "北京",
     "上海",
@@ -99,7 +102,30 @@ class GeocodeResult:
 
 def is_available() -> bool:
     """High德 is usable only when enabled and an API key is configured."""
-    return bool(settings.TOOLS_ENABLED and settings.AMAP_API_KEY)
+    return bool(settings.TOOLS_ENABLED and settings.AMAP_API_KEY and not _quota_paused())
+
+
+def unavailability_error_code() -> str | None:
+    """Expose why calls are currently impossible so the harness can stop them."""
+    if _quota_paused():
+        return "amap_quota_paused"
+    if not settings.TOOLS_ENABLED or not settings.AMAP_API_KEY:
+        return "provider_not_connected"
+    return None
+
+
+def _quota_paused() -> bool:
+    with _AMAP_QUOTA_LOCK:
+        return time.monotonic() < _AMAP_QUOTA_PAUSE_UNTIL
+
+
+def _pause_after_quota_error() -> None:
+    global _AMAP_QUOTA_PAUSE_UNTIL
+    with _AMAP_QUOTA_LOCK:
+        _AMAP_QUOTA_PAUSE_UNTIL = max(
+            _AMAP_QUOTA_PAUSE_UNTIL,
+            time.monotonic() + _AMAP_QUOTA_PAUSE_SECONDS,
+        )
 
 
 def _get(path: str, params: dict) -> dict | None:
@@ -111,8 +137,12 @@ def _get(path: str, params: dict) -> dict | None:
     query = {**params, "key": settings.AMAP_API_KEY}
     attempts = max(1, settings.TOOL_MAX_RETRY + 1)
     for attempt in range(attempts):
+        if _quota_paused():
+            return None
         try:
             _throttle_amap_qps(path)
+            if _quota_paused():
+                return None
             with httpx.Client(timeout=settings.TOOL_TIMEOUT_SECONDS) as client:
                 resp = client.get(url, params=query)
             if resp.status_code != 200:
@@ -131,6 +161,9 @@ def _get(path: str, params: dict) -> dict | None:
                     data.get("status"),
                     data.get("info"),
                 )
+                if "CUQPS_HAS_EXCEEDED_THE_LIMIT" in info:
+                    _pause_after_quota_error()
+                    return None
                 if any(
                     marker in info
                     for marker in ("TOO_FREQUENT", "QPS", "SERVER_IS_BUSY")
@@ -164,13 +197,25 @@ def static_map_image(params: dict[str, str | int]) -> bytes | None:
     query = {**params, "key": settings.AMAP_API_KEY}
     attempts = max(1, settings.TOOL_MAX_RETRY + 1)
     for attempt in range(attempts):
+        if _quota_paused():
+            return None
         try:
             _throttle_amap_qps(_STATIC_MAP_PATH)
+            if _quota_paused():
+                return None
             with httpx.Client(timeout=settings.TOOL_TIMEOUT_SECONDS) as client:
                 resp = client.get(url, params=query)
             content_type = (resp.headers.get("content-type") or "").lower()
             if resp.status_code == 200 and content_type.startswith("image/"):
                 return resp.content
+            if resp.status_code == 200 and "json" in content_type:
+                try:
+                    info = str(resp.json().get("info") or "").upper()
+                except (ValueError, AttributeError):
+                    info = ""
+                if "CUQPS_HAS_EXCEEDED_THE_LIMIT" in info:
+                    _pause_after_quota_error()
+                    return None
             logger.warning(
                 "amap %s invalid response http=%d content_type=%s",
                 _STATIC_MAP_PATH,
@@ -197,12 +242,14 @@ def static_map_image(params: dict[str, str | int]) -> bytes | None:
     return None
 
 
-def _throttle_amap_qps(service_key: str) -> None:
-    """Keep each AMap service within its screenshot-confirmed 3 QPS limit."""
-    # The active console screenshot confirms 3 QPS for every service. The env
-    # may lower this safety cap, but cannot raise it beyond the purchased tier.
+def _throttle_amap_qps(_service_key: str) -> None:
+    """Keep the API key within its observed aggregate 3 QPS allowance."""
+    # Quota errors are reported for the key as a whole. Per-path buckets allowed
+    # weather, POI and route calls to exceed that aggregate even while every
+    # individual endpoint stayed below 3 QPS.
     max_qps = min(3, max(1, int(getattr(settings, "AMAP_MAX_QPS", 3) or 3)))
     min_interval = 1.0 / max_qps
+    service_key = "global"
     with _AMAP_RATE_LOCK:
         now = time.monotonic()
         scheduled_at = max(now, _AMAP_NEXT_REQUEST_AT[service_key])
@@ -823,6 +870,39 @@ def reverse_geocode_detail(location: str) -> GeocodeResult | None:
         district=_optional_text(component.get("district")),
         formatted_address=_optional_text(regeocode.get("formatted_address")),
     )
+
+
+REGEO_BATCH_LIMIT = 20
+
+
+def reverse_geocode_batch(locations: list[str]) -> list[dict | None]:
+    """Return raw regeocode entries (address, AOIs, POIs) aligned with ``locations``.
+
+    Each location is a GCJ-02 ``lng,lat`` string. AMap accepts at most 20 points
+    per batch request; failed chunks yield ``None`` entries instead of raising.
+    """
+    results: list[dict | None] = [None] * len(locations)
+    if not locations or not is_available():
+        return results
+    for start in range(0, len(locations), REGEO_BATCH_LIMIT):
+        chunk = locations[start:start + REGEO_BATCH_LIMIT]
+        data = _get(
+            _REGEOCODE_PATH,
+            {
+                "location": "|".join(chunk),
+                "batch": "true",
+                "extensions": "all",
+                "radius": 1000,
+                "roadlevel": 0,
+            },
+        )
+        entries = data.get("regeocodes") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            continue
+        for offset, entry in enumerate(entries[: len(chunk)]):
+            if isinstance(entry, dict):
+                results[start + offset] = entry
+    return results
 
 
 def resolve_city_adcode(city: str) -> str | None:

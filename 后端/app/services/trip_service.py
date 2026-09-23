@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.core.exceptions import InvalidParamError, NotFoundError
@@ -14,15 +15,26 @@ from app.models.postcard import Postcard
 from app.models.postcard_group import PostcardGroup
 from app.models.report import Report
 from app.models.trip import Trip
+from app.models.user_memory import UserMemory
+from app.models.user_memory_event import UserMemoryEvent
 from app.services import file_asset_service, id_service, mappers
+
+
+PLACEHOLDER_TITLE_PREFIXES = ("未命名", "旅行影像")
+UNDATED_LABEL = "日期待定"
 
 
 def default_title(location: str | None, date_label: str | None = None) -> str:
     value = (location or "").strip()
-    if not value or value in {"未知目的地", "未知地点"}:
-        return "未命名旅行"
     date_text = (date_label or "").strip()
-    return f"{value} · {date_text}" if date_text and date_text != "日期待定" else value
+    has_date = bool(date_text) and date_text != UNDATED_LABEL
+    if not value or value in {"未知目的地", "未知地点"}:
+        return f"{date_text} 出发的一程" if has_date else "新的一程"
+    return f"{value} · {date_text}" if has_date else value
+
+
+def is_placeholder_title(title: str) -> bool:
+    return title.startswith(PLACEHOLDER_TITLE_PREFIXES) or title == "新的一程"
 
 
 def create_in_session(
@@ -77,8 +89,8 @@ def touch_from_artifact(
         normalized_location = ""
     if not trip.location and normalized_location:
         trip.location = normalized_location
-    if trip.title == "未命名旅行" and trip.location not in {None, "未知目的地", "未知地点"}:
-        trip.title = trip.location
+    if is_placeholder_title(trip.title) and trip.location not in {None, "未知目的地", "未知地点"}:
+        trip.title = default_title(trip.location, date_label or trip.date_label)
     if not trip.start_date and start_date:
         trip.start_date = start_date
     if not trip.end_date and end_date:
@@ -109,6 +121,20 @@ def refresh_cover(session: Session, user_id: str, trip_id: str | None) -> None:
         for item in [*groups, *reports]
         if item.cover_image
     ]
+    if not candidates:
+        plans = session.exec(
+            select(Plan).where(Plan.user_id == user_id, Plan.trip_id == trip_id)
+        ).all()
+        for plan in plans:
+            paths = file_asset_service.list_reference_paths(
+                session,
+                user_id=user_id,
+                owner_type="plan",
+                owner_id=plan.id,
+                role="plan_attachment",
+            )
+            if paths:
+                candidates.append((plan.updated_at, paths[-1]))
     trip.cover_image = max(candidates, default=(None, None), key=lambda item: item[0])[1]
     trip.updated_at = utcnow()
     session.add(trip)
@@ -124,11 +150,11 @@ def _summary(
 ) -> dto.TripSummary:
     return dto.TripSummary(
         id=trip.id,
-        title=trip.title,
+        title=(default_title(trip.location, trip.date_label) if is_placeholder_title(trip.title) else trip.title),
         location=trip.location,
         start_date=trip.start_date,
         end_date=trip.end_date,
-        date_label=trip.date_label,
+        date_label="" if trip.date_label == UNDATED_LABEL else trip.date_label,
         cover_image=trip.cover_image,
         plan_count=plan_count,
         postcard_count=postcard_count,
@@ -268,5 +294,20 @@ def delete_empty_trip(session: Session, user_id: str, trip_id: str) -> None:
     ))
     if has_content:
         raise InvalidParamError("请先删除这次旅行中的行程、明信片和报告")
+    # An empty container can still own a photo-observation snapshot. Withdraw
+    # it and any confirmed pattern that cited it before removing the trip.
+    if session.exec(select(UserMemory.id).where(UserMemory.user_id == user_id)).first() is not None:
+        from app.services import memory_service
+
+        memory_service.delete_trip_observation(
+            session, user_id=user_id, trip_id=trip_id,
+        )
+    # Keep the event audit trail while detaching its foreign key from a trip
+    # that no longer exists. The versioned event still records the trip ID in
+    # its immutable delta where applicable.
+    session.exec(update(UserMemoryEvent).where(
+        UserMemoryEvent.user_id == user_id,
+        UserMemoryEvent.trip_id == trip_id,
+    ).values(trip_id=None))
     session.delete(trip)
     session.flush()

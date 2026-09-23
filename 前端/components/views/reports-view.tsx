@@ -12,6 +12,7 @@ import {
   handleImageError,
   resolveAssetUrl,
 } from "@/lib/asset";
+import { displayPlace } from "@/lib/place";
 import type { Report } from "@/types";
 export function ReportsView() {
   const { reports, navigate, deleteReport, deletingId } = useApp();
@@ -21,7 +22,7 @@ export function ReportsView() {
       <header className="collection-header">
         <div className="brand-mark">旅有所图</div>
         <div className="collection-title-row">
-          <h1>旅行报告</h1>
+          <h1>旅行人格报告</h1>
           <Link href="/create?mode=report" className="primary-quiet-button"><Plus size={17} />生成</Link>
         </div>
         <p className="collection-count">{reports.length} 份</p>
@@ -52,9 +53,10 @@ export function ReportsView() {
                       {String(index + 1).padStart(2, "0")}
                     </span>
                     {report.dateLabel ? <p>{report.dateLabel}</p> : null}
-                    <h3>{displayLocation(report.location)}</h3>
+                    <h3>{report.profileData?.archetypeName || displayPlace(report.location, report.personalitySummary)}</h3>
+                    <span className="lg-list-route">{listSubtitle(report)}</span>
                     <span className="text-link">
-                      查看报告
+                      查看旅格
                       <ArrowUpRight size={15} />
                     </span>
                   </div>
@@ -77,7 +79,7 @@ export function ReportsView() {
         ) : (
           <EmptyState
             icon={<FileText size={28} />}
-            title="还没有旅行报告"
+            title="还没有旅行人格报告"
           >
             <Link href="/create?mode=report" className="primary-action">
               上传照片
@@ -88,7 +90,7 @@ export function ReportsView() {
       <ConfirmDialog
         open={!!pending}
         title="删除这份旅行报告？"
-        description={pending?.location || ""}
+        description={pending ? (pending.profileData?.journey?.title || displayPlace(pending.location, pending.personalitySummary)) : ""}
         onClose={() => setPending(null)}
         actions={[
           {
@@ -107,6 +109,10 @@ export function ReportsView() {
   );
 }
 
-function displayLocation(value: string) {
-  return value === "未知地点" || value === "未知目的地" ? "未命名旅行" : value
+function listSubtitle(report: Report) {
+  const profile = report.profileData
+  const journey = profile?.journey
+  const code = profile?.axes?.length ? profile.personaCode : ""
+  const place = journey?.title || displayPlace(report.location, report.personalitySummary)
+  return [code, place].filter(Boolean).join(" · ")
 }

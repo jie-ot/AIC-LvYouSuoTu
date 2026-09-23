@@ -1,7 +1,8 @@
-"""Ark OpenAI-compatible images/generations client (图生图).
+"""Ark OpenAI-compatible images/generations client.
 
-Uses the ordinary pay-as-you-go API, never Agent Plan. The historical module
-name is retained for imports. Temporary data[0].url is handed to storage_service.
+Uses the Agent Plan image generation endpoint and its dedicated API key.
+Reference images make the call image-to-image; omitting them is text-to-image.
+Temporary data[0].url is handed to storage_service.
 """
 
 from __future__ import annotations
@@ -29,61 +30,67 @@ class ImageGenerationResult:
 
 
 def generate_image(
-    *, prompt: str, image_data_urls: list[str], size: str | None = None
+    *,
+    prompt: str,
+    image_data_urls: list[str] | None = None,
+    size: str | None = None,
+    max_attempts: int | None = None,
 ) -> ImageGenerationResult:
-    """Generate one postcard image (image-to-image). Returns a transport result."""
-    if not settings.ARK_IMAGE_API_KEY:
-        raise InternalError("图片模型服务未配置 ARK_IMAGE_API_KEY（普通按量 API Key）")
+    """Generate one image. Reference images are optional (text-to-image)."""
+    if not settings.ARK_PLAN_API_KEY:
+        raise InternalError("图片模型服务未配置 ARK_PLAN_API_KEY（Agent Plan 专属 API Key）")
     return _real_generate_image(
         prompt=prompt,
-        image_data_urls=image_data_urls,
+        image_data_urls=image_data_urls or [],
         size=size or settings.ARK_IMAGE_SIZE,
+        max_attempts=max_attempts,
     )
 
 
 def _real_generate_image(
-    *, prompt: str, image_data_urls: list[str], size: str
+    *,
+    prompt: str,
+    image_data_urls: list[str],
+    size: str,
+    max_attempts: int | None = None,
 ) -> ImageGenerationResult:
     """POST the OpenAI-compatible JSON body and return the first image URL."""
-    if not image_data_urls:
-        raise AIGenerationError("AI 生成失败：图生图缺少参考图")
     if len(image_data_urls) > 10:
         raise AIGenerationError("AI 生成失败：Seedream 5.0 pro 最多支持 10 张参考图")
 
     # A HTTP-200 response without a usable image is a transient gateway result
     # in practice. Always allow one retry for that case even when the generic
-    # retry setting is disabled.
-    fallback_models = [
-        item.strip()
-        for item in getattr(settings, "ARK_IMAGE_FALLBACK_MODELS", "").split(",")
-        if item.strip()
-    ]
-    model_candidates = list(dict.fromkeys([settings.ARK_IMAGE_MODEL, *fallback_models]))
-    model_index = 0
-    attempts = max(2, settings.MODEL_MAX_RETRY + 1) + len(model_candidates) - 1
+    # retry setting is disabled. Callers that must not regenerate pass
+    # max_attempts=1.
+    attempts = (
+        max(1, max_attempts)
+        if max_attempts is not None
+        else max(2, settings.MODEL_MAX_RETRY + 1)
+    )
     last_transient: Exception | None = None
-    body = {
-        "model": model_candidates[model_index],
+    body: dict[str, object] = {
+        "model": settings.ARK_IMAGE_MODEL,
         "prompt": prompt,
-        "image": image_data_urls if len(image_data_urls) > 1 else image_data_urls[0],
         "size": size,
         "response_format": "url",
         "output_format": "jpeg",
         "watermark": False,
-        # Seedream 5.0 pro generates a single image and rejects sequential options.
+        # Each request asks for one image; no group-generation options.
     }
+    if image_data_urls:
+        body["image"] = image_data_urls if len(image_data_urls) > 1 else image_data_urls[0]
 
     for attempt in range(attempts):
         request_id = str(uuid.uuid4())
         headers = {
-            "Authorization": f"Bearer {settings.ARK_IMAGE_API_KEY}",
+            "Authorization": f"Bearer {settings.ARK_PLAN_API_KEY}",
             "Content-Type": "application/json; charset=utf-8",
         }
         started = time.monotonic()
         try:
             with httpx.Client(timeout=settings.ARK_IMAGE_TIMEOUT_SECONDS) as client:
                 resp = client.post(
-                    f"{settings.ARK_IMAGE_BASE_URL.rstrip('/')}/images/generations",
+                    f"{settings.ARK_PLAN_BASE_URL.rstrip('/')}/images/generations",
                     headers=headers,
                     json=body,
                 )
@@ -161,36 +168,30 @@ def _real_generate_image(
             empty_reason = "invalid_json"
 
         # Ark uses HTTP 400 + error.code for input-policy rejection.
-        if _is_input_policy_violation(payload):
+        policy_codes = _input_policy_codes(payload)
+        if policy_codes:
+            provider_code = policy_codes[0]
+            input_kind = (
+                "image"
+                if provider_code.startswith("InputImage")
+                else "text"
+                if provider_code.startswith("InputText")
+                else "unknown"
+            )
             log_event(
                 "ark_image",
                 status="rejected",
                 request_id=request_id,
                 attempt=attempt + 1,
-                reason="input_policy_violation",
+                reason=f"{input_kind}_input_policy_violation",
                 http_status=resp.status_code,
                 response_summary=_summarize_response(payload, resp),
             )
-            raise ImageInputPolicyError("图片模型输入内容审核未通过")
-
-        if _is_model_not_open(payload) and model_index + 1 < len(model_candidates):
-            previous_model = model_candidates[model_index]
-            model_index += 1
-            body["model"] = model_candidates[model_index]
-            logger.warning(
-                "ark image model not open; trying configured fallback (%s -> %s)",
-                previous_model,
-                body["model"],
+            raise ImageInputPolicyError(
+                "图片模型输入内容审核未通过",
+                input_kind=input_kind,
+                provider_code=provider_code,
             )
-            log_event(
-                "ark_image_model_fallback",
-                status="retry",
-                request_id=request_id,
-                reason="model_not_open",
-                previous_model=previous_model,
-                fallback_model=body["model"],
-            )
-            continue
 
         if resp.status_code != 200:
             response_summary = _summarize_response(payload, resp)
@@ -322,20 +323,18 @@ def _provider_errors(payload: object) -> list[dict]:
 
 def _is_input_policy_violation(payload: object) -> bool:
     """Match only the provider's explicit input-policy rejection response."""
-    return any(
-        str(error.get("code", "")).split(".")[0] in {
+    return bool(_input_policy_codes(payload))
+
+
+def _input_policy_codes(payload: object) -> list[str]:
+    return [
+        code
+        for error in _provider_errors(payload)
+        if (code := str(error.get("code", "")).split(".")[0]) in {
             "InputTextSensitiveContentDetected", "InputImageSensitiveContentDetected",
             "SensitiveContentDetected",
         }
-        for error in _provider_errors(payload)
-    )
-
-
-def _is_model_not_open(payload: object) -> bool:
-    return any(
-        str(error.get("code", "")).split(".")[0] == "ModelNotOpen"
-        for error in _provider_errors(payload)
-    )
+    ]
 
 
 def _guess_ext(url: str) -> str:

@@ -8,7 +8,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import Link from "next/link";
 import {
+  Brain,
   CalendarDays,
   ChevronDown,
   Download,
@@ -25,7 +27,7 @@ import {
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useApp } from "@/components/shared/app-context";
-import { resolveAssetUrl } from "@/lib/asset";
+import { handleImageError, resolveAssetUrl } from "@/lib/asset";
 import { renderItineraryImage } from "@/lib/itinerary-image";
 import { saveTravelImage, saveTravelImageBlob } from "@/lib/postcard-save";
 import { formatScheduleTimeRange } from "@/lib/schedule-time";
@@ -49,9 +51,13 @@ function destinationMood(destination: string) {
 export function ItineraryDetail({
   data,
   exportTarget,
+  onExcludeMemory,
+  comparingMemory,
 }: {
   data: ItineraryData;
   exportTarget?: HTMLElement | null;
+  onExcludeMemory?: (memoryId: string) => void;
+  comparingMemory?: boolean;
 }) {
   const { registerBackHandler, toast } = useApp();
   const {
@@ -61,6 +67,8 @@ export function ItineraryDetail({
     food_recommendations,
     itinerary,
     advisories,
+    memory_context,
+    memory_basis,
   } = data;
   const [activeDay, setActiveDay] = useState(itinerary[0]?.id ?? "");
   const [expandedSchedules, setExpandedSchedules] = useState<Set<string>>(
@@ -189,6 +197,36 @@ export function ItineraryDetail({
               ))}
             </ul>
           </aside>
+        ) : null}
+
+        {memory_context ? (
+          <section className="itinerary-memory-evidence" aria-label="本次规划的旅行记忆依据">
+            <div className="itinerary-memory-heading"><Brain size={18} aria-hidden /><h2>这份行程参考了什么记忆</h2></div>
+            {!memory_context.enabled ? <p>这次规划没有使用已保存的旅行记忆。</p> :
+              memory_context.selected.length === 0 ? <p>本次没有选到适用的已确认记忆，行程按你这次的要求规划。</p> : (
+                <>
+                  <p>以下是提供给规划器的已确认要求。你本次明确提出的要求始终优先。</p>
+                  <ul className="itinerary-memory-list">
+                    {memory_context.selected.map((item) => {
+                      const linked = (memory_basis ?? []).filter((basis) => basis.memory_id === item.id)
+                      return <li key={item.id}>
+                        <strong>{item.text}</strong>
+                        <span>{item.source_trip_id ? <Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_id)}&from=memory`}>{item.source_trip_title ?? "查看来源旅行"}</Link> : item.source_kind === "observed_pattern" && item.source_trip_ids?.length ? <><Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_ids[0])}&from=memory`}>查看来源旅行</Link> · 根据 {item.source_trip_ids.length} 次旅行由你确认</> : "由你保存的旅行要求"}</span>
+                        {item.source_photos?.length ? <div className="itinerary-memory-photos" aria-label="这条记忆的来源照片">
+                          {item.source_photos.slice(0, 4).map((photo) => <a key={photo.asset_id} href={resolveAssetUrl(photo.image_url)} target="_blank" rel="noreferrer" aria-label="查看来源照片"><img src={resolveAssetUrl(photo.image_url)} alt="来源旅行照片" onError={handleImageError} /></a>)}
+                        </div> : null}
+                        {linked.map((basis) => <p key={`${basis.memory_id}-${basis.schedule_id}`}>
+                          {basis.match_kind === "scene" ? "可核对的同类场景" : "可核对的文本对应"}：{basis.schedule_excerpt}
+                          {basis.fact_refs.length ? ` · 关联 ${basis.fact_refs.length} 条工具事实` : ""}
+                        </p>)}
+                        {onExcludeMemory ? <button type="button" className="itinerary-memory-exclude" disabled={comparingMemory} onClick={() => onExcludeMemory(item.id)}>这次不参考此条，生成对照</button> : null}
+                      </li>
+                    })}
+                  </ul>
+                  <Link className="itinerary-memory-manage" href="/memory">检查或修改旅行记忆</Link>
+                </>
+              )}
+          </section>
         ) : null}
 
         {(preparations.length > 0 ||

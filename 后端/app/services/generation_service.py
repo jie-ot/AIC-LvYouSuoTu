@@ -9,8 +9,10 @@ import logging
 import os
 import re
 import uuid
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date, datetime
 from threading import Lock
 
 from sqlalchemy import update
@@ -43,8 +45,11 @@ from app.services import (
     date_label_service,
     file_asset_service,
     id_service,
+    journey_features,
     mappers,
     memory_service,
+    palette_service,
+    place_service,
     postcard_renderer,
     profile_engine,
     storage_service,
@@ -208,6 +213,75 @@ def _validate_analysis(analysis: PhotoAnalysisResult, source_ids: set[str]) -> N
         raise AIGenerationError("AI 照片分析结果不完整")
 
 
+def _apply_photo_dates(analysis: PhotoAnalysisResult, photos: list[dto.UploadedPhoto]) -> None:
+    """Prefer camera date metadata over dates guessed from image content."""
+    dates: list[date] = []
+    for photo in photos:
+        value = photo.taken_at or ""
+        if not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?",
+            value,
+        ):
+            continue
+        try:
+            dates.append(datetime.fromisoformat(value.replace("Z", "+00:00")).date())
+        except ValueError:
+            continue
+    if dates:
+        analysis.start_date = min(dates).isoformat()
+        analysis.end_date = max(dates).isoformat()
+
+
+def _has_ten_usable_report_photos(analysis: PhotoAnalysisResult) -> bool:
+    return sum(photo.suitability != "unsuitable" for photo in analysis.photos) >= 10
+
+
+def _resolve_analysis_location(
+    analysis: PhotoAnalysisResult, places: place_service.TripPlaces | None = None,
+) -> str:
+    if places is not None and places.destination:
+        return places.destination
+    overall = (analysis.overall_location or "").strip()
+    unknown_markers = ("未知", "不确定", "无法判断", "不详", "经度", "纬度", "GPS")
+    if overall and not any(term in overall for term in unknown_markers):
+        return overall
+    # Without GPS, trust the most repeated place the vision model read from
+    # landmarks, visible text or the user's own description.
+    guesses = [
+        (photo.location_guess or "").strip().split("·")[0]
+        for photo in analysis.photos
+        if photo.suitability != "unsuitable"
+        and photo.location_guess
+        and re.search(r"[\u4e00-\u9fff]", photo.location_guess)
+        and not any(term in photo.location_guess for term in unknown_markers)
+    ]
+    return Counter(guesses).most_common(1)[0][0] if guesses else "未知目的地"
+
+
+def _scene_trip_title(analysis: PhotoAnalysisResult | None, date_label: str) -> str | None:
+    if analysis is None:
+        return None
+    labels = {
+        "coast": "海岸", "mountain": "山野", "food": "美食", "street": "街景",
+        "culture": "人文", "night": "夜景", "nature": "自然", "city": "城市",
+    }
+    counts: Counter[str] = Counter(
+        tag for photo in analysis.photos
+        if photo.suitability != "unsuitable" and photo.analysis_confidence >= 0.7
+        for tag in dict.fromkeys(photo.scene_tags) if tag in labels
+    )
+    # Do not produce titles such as "海岸与自然" or "街景与城市" from nested tags.
+    if counts["coast"] or counts["mountain"]:
+        counts.pop("nature", None)
+    if counts["street"]:
+        counts.pop("city", None)
+    if not counts:
+        return None
+    themes = [labels[tag] for tag, _ in counts.most_common(2)]
+    subject = "与".join(themes) if len(themes) > 1 else f"{themes[0]}影像"
+    return f"{subject} · {date_label}" if date_label and date_label != "日期待定" else subject
+
+
 def _parse_legacy_postcard_count(requirements: str) -> int | None:
     values = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
     patterns = (
@@ -290,6 +364,8 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
     options = request.options
     if not options.generate_postcards and not options.generate_report:
         raise InvalidParamError("请至少选择生成明信片或报告其一")
+    if options.generate_report and len(request.photos) < 10:
+        raise InvalidParamError("生成人格报告至少需要 10 张不重复的照片")
     operation_id, replay, replay_pending = _begin_operation(user_id, request)
     if replay is not None:
         if replay_pending and replay.memory_status in {"pending", "failed"}:
@@ -314,19 +390,36 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             source_checksum_by_asset = {
                 asset.id: str(asset.checksum) for asset in validated_assets
             }
-            profile_history = profile_engine.build_history_snapshot([
-                report.profile_data
-                for report in session.exec(
-                    select(ReportEntity).where(ReportEntity.user_id == user_id)
-                ).all()
-            ])
+            previous_reports = session.exec(
+                select(ReportEntity)
+                .where(ReportEntity.user_id == user_id)
+                .order_by(ReportEntity.created_at.asc())
+            ).all()
+            profile_history = profile_engine.build_history_snapshot(
+                [report.profile_data for report in previous_reports],
+                trip_ids=[report.trip_id for report in previous_reports],
+                exclude_trip_id=request.trip_id,
+            )
 
+        with timed_stage("generate_place_resolution", photo_count=len(request.photos)):
+            trip_places = place_service.resolve_trip_places(list(request.photos))
+        log_event(
+            "generate_place_resolution_result",
+            status="success" if trip_places.resolved else "unresolved",
+            located=len(trip_places.by_asset),
+            route=trip_places.route,
+        )
         photo_metas = [
             {
                 "asset_id": p.asset_id,
                 "image_url": source_path_by_asset[p.asset_id],
                 "taken_at": p.taken_at,
                 "location": p.location,
+                "place": (
+                    trip_places.by_asset[p.asset_id].label
+                    if p.asset_id in trip_places.by_asset
+                    else None
+                ),
             }
             for p in request.photos
         ]
@@ -338,8 +431,14 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
                 requirements=request.requirements, memory_summary="",
             )
         _validate_analysis(analysis, set(source_asset_ids))
+        _apply_photo_dates(analysis, request.photos)
         if all(photo.suitability == "unsuitable" for photo in analysis.photos):
             raise AIGenerationError("这组照片暂时不适合生成作品，请更换清晰且与旅行相关的照片")
+        report_photo_shortfall = (
+            options.generate_report and not _has_ten_usable_report_photos(analysis)
+        )
+        if report_photo_shortfall and not options.generate_postcards:
+            raise AIGenerationError("可用于人格报告的旅行照片不足 10 张，请补传清晰、与旅行相关的照片")
         log_event(
             "generate_photo_analysis_result", status="success",
             photo_count=len(analysis.photos),
@@ -347,12 +446,20 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             result_hash=hashlib.sha256(analysis.model_dump_json().encode()).hexdigest()[:16],
         )
 
-        location = (analysis.overall_location or "未知目的地").strip() or "未知目的地"
+        location = _resolve_analysis_location(analysis, trip_places)
+        if location != "未知目的地":
+            analysis.overall_location = location
         date_label = date_label_service.generate_label(analysis.start_date, analysis.end_date)
         postcard_renders: list[PostcardRender] = []
         report_draft: ReportDraftResult | None = None
         postcard_status = "skipped"
-        report_status = "skipped"
+        report_status = "failed" if report_photo_shortfall else "skipped"
+        if report_photo_shortfall:
+            warnings.append(_warning(
+                "REPORT_PHOTOS_INSUFFICIENT",
+                "可用于人格报告的旅行照片不足 10 张；明信片会继续生成，请补传清晰旅行照片后再试报告",
+                "report",
+            ))
         memory_status = "pending" if options.learn_preferences else "skipped"
         memory_update: MemoryUpdateResult | None = None
         memory_proposal_failed = False
@@ -371,9 +478,10 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
                     generated_temp_asset_ids=generated_temp_asset_ids,
                     warnings=warnings, warnings_lock=warnings_lock,
                 ))
-            if options.generate_report:
+            if options.generate_report and not report_photo_shortfall:
                 report_future = executor.submit(call_in_current_context(
-                    _draft_report_v3, analysis=analysis, requirements=request.requirements,
+                    _draft_report_v5, analysis=analysis, requirements=request.requirements,
+                    uploaded_photos=list(request.photos), places=trip_places,
                     image_url_by_asset=source_path_by_asset,
                     history=profile_history,
                     warnings=warnings, warnings_lock=warnings_lock,
@@ -436,7 +544,10 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
         useful_source_asset_ids = [
             photo.asset_id for photo in analysis.photos if photo.suitability != "unsuitable"
         ]
-        report_cover_source_id = _representative_asset_id(analysis)
+        report_cover_source_id = (
+            (profile_engine.signature_asset_id(report_draft) if report_draft else None)
+            or _representative_asset_id(analysis)
+        )
         pending = None
         if memory_update is not None:
             pending = {
@@ -513,6 +624,29 @@ def _generate_postcards(
                 requirements=requirements, memory_summary="",
             )
         plan_items = _enforce_postcard_plan(plan, selection)
+    except orchestrator.PartialPostcardCreativePlanError as exc:
+        fallback_items = _fallback_postcard_plan(analysis, selection)
+        series_motif = next(
+            (item.series_motif for item in exc.candidates if item is not None),
+            fallback_items[0].series_motif,
+        )
+        plan_items = []
+        for index, (candidate, selected, fallback_item) in enumerate(
+            zip(exc.candidates, selection.items, fallback_items, strict=True)
+        ):
+            if candidate is not None and candidate.source_asset_ids == selected.source_asset_ids:
+                plan_items.append(candidate)
+                continue
+            plan_items.append(fallback_item.model_copy(update={"series_motif": series_motif}))
+            warnings.append(_warning(
+                "CREATIVE_ITEM_FALLBACK",
+                "该张创意方案未通过校验，已单独使用原图对应的本地艺术指导",
+                "postcard", item_index=index, retryable=True,
+            ))
+        plan_items = _enforce_postcard_plan(PostcardPlanResult(items=plan_items), selection)
+        logger.warning("postcard creative partial fallback: %d item(s)", sum(
+            item is None for item in exc.candidates
+        ))
     except Exception as exc:  # noqa: BLE001
         logger.warning("postcard creative fallback: %s", type(exc).__name__)
         plan_items = _fallback_postcard_plan(analysis, selection)
@@ -579,14 +713,16 @@ def _fallback_postcard_plan(
         "tactile_collage",
     )
     fallback_compositions = (
-        "oversized_crop",
+        "quiet_corner",
         "vertical_spine",
         "split_stack",
         "outline_echo",
     )
     for index, selected in enumerate(selection.items):
         photo = by_id[selected.source_asset_ids[0]]
-        title = _fallback_title(photo.scene_tags)
+        title = _fallback_title(
+            photo.scene_tags, photo.scene_summary, photo.analysis_confidence,
+        )
         canvas_format, ratio_label = fallback_formats[index % len(fallback_formats)]
         layout_style = fallback_layouts[index % len(fallback_layouts)]
         type_composition = fallback_compositions[index % len(fallback_compositions)]
@@ -595,12 +731,12 @@ def _fallback_postcard_plan(
             design_concept="从原图主体方向和色彩关系出发，以大胆尺度与印刷触感形成独立而非套版的旅行明信片",
             photo_transformation="保留可辨认主体与地点事实，以决定性裁切、原图纹理延展和局部尺度变化重组画面",
             visual_device="用原图轮廓、颜色和局部细节建立前后景呼应，避免通用边框与固定装饰",
-            typography="标题由本地以强烈尺度对比排版，允许裁边、竖排或轮廓回声，但保持准确可读",
+            typography="由图像模型直接绘制完整中文标题；按原图选择夸张装饰、克制优雅或高对比冲击字形，保持清楚可读",
             type_style={
                 "family": "condensed_sans" if index % 2 == 0 else "editorial_serif",
                 "composition": type_composition,
                 "treatment": "duotone" if index % 2 == 0 else "outline",
-                "scale": "hero",
+                "scale": "balanced",
                 "color_role": "source_accent",
                 "rotation_degrees": 0,
             },
@@ -609,7 +745,7 @@ def _fallback_postcard_plan(
             visual_medium="mixed_media",
             palette_strategy="source_accent",
             title_placement="bottom_left",
-            text_rendering="local_exact",
+            text_rendering="model_integrated",
             title=title,
             source_asset_ids=list(selected.source_asset_ids),
             extra_texts=[],
@@ -619,18 +755,30 @@ def _fallback_postcard_plan(
                 "将图片1作为唯一主体与地点事实参考，保留人物身份、核心景物和可辨认地貌。"
                 f"制作{ratio_label}当代旅行明信片，以原图轮廓和色彩组织构图，主体自然形成尺度对比，"
                 "背景只用原图颜色与纹理延展，加入细腻纸纤维和克制印刷颗粒；统一真实光线，"
-                "在主体较安静一侧形成排版通道。不得新增人物、地标或事件；底图无可读文字、"
-                "字母、数字、Logo、水印、邮戳或日期。"
+                f"在主体较安静一侧直接绘制完整中文标题『{title}』，使字形与照片形成空间关系。"
+                "不得新增人物、地标、事件、随机文字、Logo、水印、邮戳或日期。"
             ),
         ))
     return items
 
 
-def _fallback_title(tags: list[str]) -> str:
-    for key, title in (("mountain", "山景"), ("coast", "海岸"), ("culture", "人文景观"), ("city", "城市"), ("night", "夜景"), ("street", "街区")):
+def _fallback_title(
+    tags: list[str], scene_summary: str = "", confidence: float = 0.0,
+) -> str:
+    if (
+        confidence >= 0.7
+        and {"culture", "night"}.issubset(tags)
+        and re.search(r"楼阁|亭阁|亭台|楼台|古楼|古阁", scene_summary)
+    ):
+        return "灯下楼阁"
+    for key, title in (
+        ("coast", "海岸"), ("food", "旅途味道"), ("culture", "人文景观"),
+        ("mountain", "山野"), ("night", "夜色"), ("city", "城市漫游"),
+        ("street", "街区"), ("nature", "自然风景"),
+    ):
         if key in tags:
             return title
-    return "旅行明信片"
+    return "沿途所见"
 
 
 def _render_and_store_postcard(
@@ -639,12 +787,8 @@ def _render_and_store_postcard(
     warnings_lock: Lock,
 ) -> PostcardRender:
     fallback = False
-    type_composition = item.type_style.composition
-    type_treatment = item.type_style.treatment
-    type_scale = item.type_style.scale
-    type_color_role = item.type_style.color_role
-    title_placement = item.title_placement
     relative_path = storage_service.build_postcard_relative_path("jpg")
+    approved_preview: postcard_renderer.ComposedPostcard | None = None
     try:
         image_result = orchestrator.render_postcard_image(
             prompt=item.image_prompt, image_data_urls=[source_data_url],
@@ -654,7 +798,7 @@ def _render_and_store_postcard(
             type_style=item.type_style, canvas_format=item.canvas_format,
             layout_style=item.layout_style, visual_medium=item.visual_medium,
             palette_strategy=item.palette_strategy,
-            title_placement=item.title_placement, text_rendering=item.text_rendering,
+            title_placement=item.title_placement,
             title=item.title, extra_texts=item.extra_texts,
             emblem_style=item.emblem_style, emblem_text=item.emblem_text,
         )
@@ -668,103 +812,81 @@ def _render_and_store_postcard(
         source = postcard_renderer.decode_data_url(source_data_url)
         with warnings_lock:
             warnings.append(_warning(
-                "POSTCARD_LOCAL_FALLBACK", "云端图片生成未完成，该张已使用本地创意版式",
+                "POSTCARD_LOCAL_FALLBACK", "云端图片生成未完成，已保留原图预览，请重试",
                 "postcard", item_index=index, retryable=True,
             ))
         logger.warning("postcard item fallback index=%d reason=%s", index, type(exc).__name__)
-
-    if not fallback and settings.POSTCARD_AESTHETIC_REVIEW_ENABLED:
+    if not fallback:
+        critique = None
+        preview = None
         try:
-            preview = _compose_planned_postcard(
-                source,
-                item,
-                fallback=False,
-                type_composition=type_composition,
-                type_treatment=type_treatment,
-                type_scale=type_scale,
-                type_color_role=type_color_role,
-                title_placement=title_placement,
-            )
+            preview = _compose_planned_postcard(source, item, fallback=False)
+            approved_preview = preview
             with _CREATIVE_MODEL_LOCK:
                 critique = orchestrator.review_postcard_artwork(
                     original_data_url=source_data_url,
                     candidate_data_url=_jpeg_data_url(preview.content),
                     item=item,
                 )
-            if not critique.approved:
-                (
-                    type_composition,
-                    type_treatment,
-                    type_scale,
-                    type_color_role,
-                    title_placement,
-                ) = _apply_typography_adjustment(
-                    critique.typography_adjustment,
-                    composition=type_composition,
-                    treatment=type_treatment,
-                    scale=type_scale,
-                    color_role=type_color_role,
-                    placement=title_placement,
+            if not orchestrator.postcard_review_is_acceptable(critique):
+                repair_result = orchestrator.repair_postcard_artwork(
+                    original_data_url=source_data_url,
+                    candidate_base_data_url=_jpeg_data_url(source),
+                    item=item,
+                    critique=critique,
                 )
-                if (
-                    settings.POSTCARD_AESTHETIC_REPAIR_ENABLED
-                    and critique.repair_target in {"image", "both"}
-                ):
-                    repair_result = orchestrator.repair_postcard_artwork(
-                        original_data_url=source_data_url,
-                        candidate_base_data_url=_jpeg_data_url(source),
-                        item=item,
-                        critique=critique,
-                    )
-                    if not repair_result.image_url:
-                        raise InternalError("图片审美返修暂未返回结果")
-                    repaired = storage_service.download_to_static(
-                        repair_result.image_url,
-                        relative_path,
-                    )
-                    with open(repaired.abs_path, "rb") as file:
-                        source = file.read()
-                    log_event(
-                        "postcard_aesthetic_repair",
-                        status="applied",
-                        item_index=index,
-                        repair_target=critique.repair_target,
-                    )
+                if not repair_result.image_url:
+                    raise InternalError("图片审美返修暂未返回结果")
+                repaired = storage_service.download_to_static(
+                    repair_result.image_url, relative_path,
+                )
+                with open(repaired.abs_path, "rb") as file:
+                    repaired_source = file.read()
+                # The one repaired image is the final deliverable. Do not
+                # invoke another critic or schedule another repair.
+                approved_preview = _compose_planned_postcard(
+                    repaired_source, item, fallback=False,
+                )
+                log_event(
+                    "postcard_aesthetic_repair",
+                    status="applied",
+                    item_index=index,
+                    repair_target=critique.repair_target,
+                )
         except Exception as exc:  # noqa: BLE001
+            fallback = preview is None or (
+                critique is not None
+                and orchestrator.postcard_review_is_blocking(critique)
+            )
+            if fallback:
+                approved_preview = None
             with warnings_lock:
                 warnings.append(_warning(
-                    "POSTCARD_REVIEW_SKIPPED",
-                    "该张审美复核或返修未完成，已保留首次成图",
-                    "postcard",
-                    item_index=index,
-                    retryable=True,
+                    (
+                        "POSTCARD_BLOCKING_DEFECT_LOCAL_FALLBACK"
+                        if fallback else "POSTCARD_REVIEW_UNAVAILABLE_PRESERVED"
+                    ),
+                    (
+                        "成图或一次返修存在无法交付的问题，已保留原图预览，请重试"
+                        if fallback else "审美评审或局部返修中断，已保留生成的完整作品"
+                    ),
+                    "postcard", item_index=index, retryable=True,
                 ))
             logger.warning(
-                "postcard review skipped index=%d reason=%s",
-                index,
-                type(exc).__name__,
+                "postcard review interrupted index=%d fallback=%s reason=%s",
+                index, fallback, type(exc).__name__,
             )
+    if fallback:
+        source = postcard_renderer.decode_data_url(source_data_url)
+        approved_preview = None
     try:
-        composed = _compose_planned_postcard(
-            source,
-            item,
-            fallback=fallback,
-            type_composition=type_composition,
-            type_treatment=type_treatment,
-            type_scale=type_scale,
-            type_color_role=type_color_role,
-            title_placement=title_placement,
+        composed = approved_preview or _compose_planned_postcard(
+            source, item, fallback=fallback,
         )
         stored = storage_service.save_bytes_to_static(composed.content, relative_path, "image/jpeg")
     except Exception:
         storage_service.delete_physical_file(relative_path)
         raise
-    if composed.font_missing:
-        with warnings_lock:
-            warnings.append(_warning(
-                "FONT_MISSING", "未找到可用的中文字体，该张已使用无字模板，标题仍会在卡片下方显示",
-                "postcard", item_index=index,
-            ))
     try:
         with session_scope() as session:
             asset = file_asset_service.create_temporary(
@@ -790,98 +912,59 @@ def _compose_planned_postcard(
     item: PostcardPlanItem,
     *,
     fallback: bool,
-    type_composition: str,
-    type_treatment: str,
-    type_scale: str,
-    type_color_role: str,
-    title_placement: str,
 ) -> postcard_renderer.ComposedPostcard:
     return postcard_renderer.compose_postcard(
         source,
-        item.title,
         fallback=fallback,
         canvas_format=item.canvas_format,
-        layout_style=item.layout_style,
-        title_placement=title_placement,
-        typography_family=item.type_style.family,
-        typography_composition=type_composition,
-        typography_treatment=type_treatment,
-        typography_scale=type_scale,
-        typography_color_role=type_color_role,
-        typography_rotation=item.type_style.rotation_degrees,
-        extra_texts=item.extra_texts,
-        emblem_style=item.emblem_style,
-        emblem_text=item.emblem_text,
-        text_rendering=("local_exact" if fallback else item.text_rendering),
     )
-
-
-def _apply_typography_adjustment(
-    adjustment: str,
-    *,
-    composition: str,
-    treatment: str,
-    scale: str,
-    color_role: str,
-    placement: str,
-) -> tuple[str, str, str, str, str]:
-    if adjustment == "reduce_scale":
-        scale = {
-            "hero": "bold",
-            "bold": "balanced",
-            "balanced": "restrained",
-            "restrained": "review_reduced",
-        }.get(scale, scale)
-    elif adjustment == "increase_contrast":
-        color_role = "auto_contrast"
-        treatment = "offset_shadow"
-    elif adjustment == "move_opposite_corner":
-        placement = {
-            "top_left": "bottom_right",
-            "top_right": "bottom_left",
-            "bottom_left": "top_right",
-            "bottom_right": "top_left",
-        }.get(placement, placement)
-    elif adjustment == "simplify_treatment":
-        treatment = "solid"
-        if composition in {"outline_echo", "angled_label"}:
-            composition = "quiet_corner"
-    return composition, treatment, scale, color_role, placement
 
 
 def _jpeg_data_url(content: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")
 
 
-def _draft_report_v3(
+def _draft_report_v5(
     *, analysis: PhotoAnalysisResult, requirements: str,
+    uploaded_photos: list[dto.UploadedPhoto],
+    places: place_service.TripPlaces,
     image_url_by_asset: dict[str, str],
     history: profile_engine.ProfileHistory,
     warnings: list[dto.GenerationWarning], warnings_lock: Lock,
 ) -> ReportDraftResult:
-    base = profile_engine.build_profile(
-        analysis, requirements=requirements, memory_json=None,
-        image_url_by_asset=image_url_by_asset,
-        history=history,
-    )
+    useful_paths = [
+        image_url_by_asset[photo.asset_id]
+        for photo in analysis.photos
+        if photo.suitability != "unsuitable" and photo.asset_id in image_url_by_asset
+    ]
+    with timed_stage("generate_report_features", photo_count=len(useful_paths)):
+        palette = palette_service.extract_trip_palette(useful_paths)
+        features = journey_features.build_features(analysis, uploaded_photos, places, palette)
+        base = profile_engine.build_profile(
+            features, requirements=requirements,
+            image_url_by_asset=image_url_by_asset, history=history,
+        )
+    stat_ids = {stat.id for stat in base.profile_data.stats}
     try:
         with _CREATIVE_MODEL_LOCK:
-            copy = orchestrator.draft_report_copy(
-                analysis=analysis,
-                base_profile=base.profile_data,
+            copy, issues = orchestrator.draft_report_copy(
+                brief=profile_engine.copy_brief(base, features),
                 requirements=requirements,
+                validate=lambda candidate: profile_engine.copy_issues(candidate, features, stat_ids),
             )
-        return profile_engine.apply_creative_copy(base, copy)
     except Exception as exc:  # noqa: BLE001
         with warnings_lock:
             warnings.append(_warning(
                 "REPORT_COPY_FALLBACK",
-                "人格文案已使用本地编辑版本，照片事实与累计轨迹不受影响",
+                "旅格文案已使用本地编辑版本，照片计算出的旅格不受影响",
                 "report",
                 retryable=True,
             ))
         logger.warning("report copy fallback: %s", type(exc).__name__)
         return base
+    if issues:
+        log_event("report_copy_field_fallback", status="partial", fields=sorted(issues))
+    return profile_engine.apply_creative_copy(base, copy, set(issues))
 
 
 def _representative_asset_id(analysis: PhotoAnalysisResult) -> str:
@@ -904,6 +987,16 @@ def _persist_results(
     group_dto: dto.PostcardGroup | None = None
     report_dto: dto.Report | None = None
     created_trip = requested_trip_id is None
+    location_known = location not in {"未知目的地", "未知地点", ""}
+    journey = report_draft.profile_data.journey if report_draft is not None else None
+    # Artworks always carry a readable place line: the resolved destination, or
+    # a title inferred from what the photos show when no place could be read.
+    display_location = (
+        location if location_known
+        else (journey.title if journey else None)
+        or _scene_trip_title(analysis, "")
+        or "沿途所见"
+    )
     with session_scope() as session:
         trip = (
             trip_service.require_owned(session, user_id, requested_trip_id)
@@ -911,18 +1004,26 @@ def _persist_results(
             else trip_service.create_in_session(
                 session,
                 user_id=user_id,
+                title=(
+                    None if location_known
+                    else journey.title if journey
+                    else _scene_trip_title(analysis, date_label)
+                ),
                 location=location,
                 start_date=start_date,
                 end_date=end_date,
                 date_label=date_label,
-                cover_image=(postcard_renders[0].relative_path if postcard_renders else None),
+                # A render is still temporary here. Publishing its path before
+                # the postcard transaction succeeds leaves a dead Trip cover
+                # when that branch rolls back and the temporary asset is deleted.
+                cover_image=None,
             )
         )
         trip_id = trip.id
     if postcard_renders and postcard_status == "success":
         try:
             group_dto = _persist_postcard_branch(
-                user_id=user_id, location=location, date_label=date_label,
+                user_id=user_id, location=display_location, date_label=date_label,
                 start_date=start_date, end_date=end_date,
                 trip_id=trip_id,
                 postcard_renders=postcard_renders,
@@ -937,7 +1038,7 @@ def _persist_results(
     if report_draft is not None and report_status == "success":
         try:
             report_dto = _persist_report_branch(
-                user_id=user_id, location=location, date_label=date_label,
+                user_id=user_id, location=display_location, date_label=date_label,
                 start_date=start_date, end_date=end_date,
                 trip_id=trip_id,
                 source_asset_ids=source_asset_ids, report_draft=report_draft,
@@ -1079,7 +1180,7 @@ def _persist_report_branch(
             personality_summary=report_draft.personality_summary,
             content=report_draft.content,
             chart_data=[point.model_dump() for point in report_draft.chart_data],
-            profile_version=4,
+            profile_version=profile_engine.PROFILE_VERSION,
             profile_data=report_draft.profile_data.model_dump(by_alias=True),
         )
         session.add(report)

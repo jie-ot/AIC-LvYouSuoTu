@@ -111,7 +111,7 @@ def bind_verified_poi_locations(
 ) -> ItineraryData:
     """Fill missing schedule coordinates from exact-name retained POI facts.
 
-    Does not invent names, overwrite trusted coordinates, or touch reference
+    Does not invent names, overwrite trusted coordinates, or touch intercity
     transport rows. Same-name POIs with conflicting coordinates are skipped.
     """
     if not facts:
@@ -123,8 +123,6 @@ def bind_verified_poi_locations(
     bound = 0
     for day in updated.itinerary:
         for schedule in day.schedules:
-            if schedule.fact_status == "reference":
-                continue
             if classify_schedule(schedule, fact_for_schedule(schedule, facts)) == "transport":
                 continue
             if _trusted_coord(schedule):
@@ -377,9 +375,14 @@ def _build_map(
         for index in range(1, len(points))
     ]
     map_id = f"map_{day.date.replace('-', '')}_{group_index + 1}"
+    map_title = (
+        group_name
+        if any(candidate.schedule.map_group for candidate in candidates)
+        else day.title
+    )
     daily_map = DailyMap(
         id=map_id,
-        title=group_name,
+        title=map_title,
         points=points,
         legs=legs,
     )

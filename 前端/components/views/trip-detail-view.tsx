@@ -145,7 +145,10 @@ export function TripDetailView() {
           {tripReports.length ? tripReports.map((report) => (
             <Link key={report.id} href={`/reports/detail?reportId=${encodeURIComponent(report.id)}&from=trip&tripId=${encodeURIComponent(trip.id)}`} className="trip-content-row">
               <span className="trip-row-icon"><FileText size={18} /></span>
-              <span><strong>旅行报告</strong><small>{report.dateLabel}</small></span>
+              <span>
+                <strong>{report.profileData?.axes?.length ? `旅格 · ${report.profileData.archetypeName}` : "旅行报告"}</strong>
+                <small>{[report.profileData?.axes?.length ? report.profileData.personaCode : "", report.dateLabel].filter(Boolean).join(" · ")}</small>
+              </span>
               <ArrowRight size={17} />
             </Link>
           )) : <p className="trip-section-empty">尚未生成</p>}

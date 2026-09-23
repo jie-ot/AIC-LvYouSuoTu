@@ -30,6 +30,7 @@ import {
   type PlanWithAIInput,
 } from "@/lib/api"
 import { readPhotoMeta } from "@/lib/exif"
+import { preparePhotoForUpload, UPLOAD_LIMIT_BYTES } from "@/lib/upload-photo"
 import { AppError, CODE_MESSAGE, friendlyMessage, type BusinessErrorCode } from "@/lib/errors"
 import type { ItineraryData, UploadedPhoto } from "@/types"
 
@@ -146,11 +147,15 @@ function newProgressToken(): string {
  */
 async function uploadPhotoWithRetry(file: File): Promise<UploadedPhoto> {
   const meta = await readPhotoMeta(file)
+  const uploadFile = await preparePhotoForUpload(file)
   let lastErr: unknown
   for (let attempt = 0; attempt <= UPLOAD_MAX_RETRY; attempt++) {
     try {
-      const { assetId, imageUrl } = await uploadImage(file)
-      return { assetId, imageUrl, takenAt: meta.takenAt, location: meta.location }
+      const { assetId, imageUrl } = await uploadImage(uploadFile)
+      return {
+        assetId, imageUrl, takenAt: meta.takenAt, location: meta.location,
+        latitude: meta.latitude, longitude: meta.longitude, altitude: meta.altitude,
+      }
     } catch (err) {
       lastErr = err
       const retryable = err instanceof AppError && err.code === 1003
@@ -180,7 +185,9 @@ async function uploadAllPhotos(
       onProgress?.(completed, files.length)
     }
   }
-  const workerCount = Math.min(UPLOAD_CONCURRENCY, files.length)
+  // Decoding several oversized photos at once can exhaust mobile WebView memory.
+  const concurrency = files.some((file) => file.size > UPLOAD_LIMIT_BYTES) ? 2 : UPLOAD_CONCURRENCY
+  const workerCount = Math.min(concurrency, files.length)
   await Promise.all(Array.from({ length: workerCount }, worker))
   return results
 }
@@ -650,6 +657,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         context: draftItineraryData,
         messages: [{ role: "user", content: message, planningModel }],
         confirmed: true,
+        useMemory: draftItineraryData.memory_context?.enabled ?? true,
+        excludedMemoryIds: draftItineraryData.memory_context?.excluded_ids ?? [],
       })
       return response?.itinerary ?? null
     },
@@ -685,7 +694,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 本地内联编辑同步到草稿（保留稳定 id，由调用方保证）
   const updateDraft = useCallback((data: ItineraryData) => {
-    setDraftItineraryData(data)
+    setDraftItineraryData({ ...data, planning_snapshot: null })
     setHasUnsavedDraft(true)
   }, [])
 

@@ -8,7 +8,6 @@ this module must not start a server; `uvicorn.run` only fires under
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -42,43 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with Session(engine) as session:
         ensure_demo_baseline(session)
 
-    # Warm A′ community MCP sessions before accepting traffic when configured.
-    # An unavailable optional MCP is logged and degraded; it never aborts startup.
-    await _prewarm_mcp()
     yield
-
-
-async def _prewarm_mcp() -> None:
-    """Warm enabled A′ MCP endpoints and optionally await terminal status."""
-    try:
-        from app.ai.tools import mcp_stdio
-
-        endpoints: list[tuple[str, str]] = []
-        if settings.TOOLS_ENABLED and settings.RAIL_MCP_ENABLED and settings.RAIL_MCP_ENDPOINT:
-            mcp_stdio.prewarm(settings.RAIL_MCP_ENDPOINT)
-            endpoints.append(("rail", settings.RAIL_MCP_ENDPOINT))
-        if not settings.MCP_WAIT_READY_ON_STARTUP or not endpoints:
-            return
-
-        timeout = float(settings.MCP_STARTUP_TIMEOUT_SECONDS) + 1.0
-        statuses = await asyncio.gather(
-            *(
-                asyncio.to_thread(mcp_stdio.wait_until_ready, endpoint, timeout)
-                for _, endpoint in endpoints
-            )
-        )
-        for (name, endpoint), status in zip(endpoints, statuses, strict=True):
-            if status == "ready":
-                logger.info("MCP startup ready (name=%s, endpoint=%s)", name, endpoint)
-            else:
-                logger.warning(
-                    "MCP startup unavailable (name=%s, endpoint=%s, status=%s)",
-                    name,
-                    endpoint,
-                    status,
-                )
-    except Exception:  # noqa: BLE001
-        logger.exception("MCP prewarm skipped due to error")
 
 
 def create_app() -> FastAPI:
