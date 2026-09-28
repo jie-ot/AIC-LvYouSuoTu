@@ -1,0 +1,18 @@
+{
+  "provenance": "开发助手在运行评测前编写的合成需求与预设相关性标签。不是用户研究、第三方标注或独立真实测试集。",
+  "grade_definition": {"3": "直接适合该次需求", "2": "有明确参考价值", "1": "只有部分信息可参考", "0": "本案例未判为相关"},
+  "cases": [
+    {"id": "hangzhou_hike", "need": "这次想在杭州走一段自然徒步路线。", "reader": {"destination": "杭州", "tags": ["徒步", "自然"]}, "relevance": {"demo_note_002": 3, "demo_note_001": 2, "demo_note_005": 2, "demo_note_003": 1, "demo_note_004": 1}},
+    {"id": "xiamen_slow_coast", "need": "想去厦门，在海边慢慢待着，不急着赶景点。", "reader": {"destination": "厦门", "tags": ["海边", "慢旅行"]}, "relevance": {"demo_note_011": 3, "demo_note_015": 3, "demo_note_013": 2, "demo_note_014": 1, "demo_note_012": 1}},
+    {"id": "suzhou_culture", "need": "去苏州看园林和老城建筑，喜欢摄影。", "reader": {"destination": "苏州", "tags": ["人文", "摄影"]}, "relevance": {"demo_note_021": 3, "demo_note_025": 3, "demo_note_023": 2, "demo_note_022": 2, "demo_note_024": 1}},
+    {"id": "chongqing_transit", "need": "重庆周末两天，希望用公共交通少折返。", "reader": {"destination": "重庆", "tags": ["公共交通", "周末"]}, "relevance": {"demo_note_039": 3, "demo_note_036": 2, "demo_note_040": 2, "demo_note_037": 1, "demo_note_038": 1}},
+    {"id": "xian_museum", "need": "西安看博物馆和古城，希望安排得从容。", "reader": {"destination": "西安", "tags": ["人文", "慢旅行"]}, "relevance": {"demo_note_042": 3, "demo_note_041": 3, "demo_note_045": 2, "demo_note_044": 2, "demo_note_043": 1}},
+    {"id": "shanghai_budget", "need": "上海周末用地铁出行，注重省心和整体花费。", "reader": {"destination": "上海", "tags": ["公共交通", "省心省钱", "周末"]}, "relevance": {"demo_note_048": 3, "demo_note_050": 2, "demo_note_046": 2, "demo_note_049": 1, "demo_note_047": 1}},
+    {"id": "coast_explore", "need": "去过厦门，想发现其他慢节奏海边旅行，也可看看厦门新角度。", "reader": {"tags": ["海边", "慢旅行"], "visited": ["厦门"]}, "relevance": {"demo_note_026": 3, "demo_note_029": 3, "demo_note_028": 2, "demo_note_011": 2, "demo_note_015": 2, "demo_note_013": 1, "demo_note_027": 1}},
+    {"id": "confirmed_memory_over_photo", "need": "明确确认过喜欢海边，但仅一次照片报告碰巧以城市和人文为主。", "reader": {"memory_tags": ["海边"], "persona": {"人文": 1.0, "城市漫步": 1.0}, "persona_confidence": 0.08}, "relevance": {"demo_note_011": 3, "demo_note_015": 3, "demo_note_026": 3, "demo_note_029": 3, "demo_note_013": 2, "demo_note_028": 2}},
+    {"id": "next_plan_dali", "need": "已保存下个月的大理行程，希望看当地慢旅行经验。", "reader": {"planned": ["大理"], "memory_tags": ["慢旅行"]}, "relevance": {"demo_note_031": 3, "demo_note_033": 3, "demo_note_032": 2, "demo_note_035": 2, "demo_note_034": 1}},
+    {"id": "hangzhou_no_hike", "need": "去杭州慢慢逛，已明确表示不想徒步。", "reader": {"destination": "杭州", "tags": ["慢旅行"], "avoid_tags": ["徒步"]}, "relevance": {"demo_note_001": 3, "demo_note_004": 3, "demo_note_005": 2, "demo_note_003": 2}},
+    {"id": "food_no_destination", "need": "近期搜索了城市美食，还没有确定目的地。", "reader": {"tags": ["美食", "城市漫步"]}, "relevance": {"demo_note_009": 3, "demo_note_012": 3, "demo_note_017": 3, "demo_note_035": 3, "demo_note_038": 3, "demo_note_049": 3, "demo_note_003": 2, "demo_note_024": 2, "demo_note_030": 2, "demo_note_043": 2}},
+    {"id": "chengdu_calm", "need": "准备去成都，想要公园、看展和有休息时间的路线。", "reader": {"destination": "成都", "tags": ["慢旅行", "人文"]}, "relevance": {"demo_note_016": 3, "demo_note_019": 3, "demo_note_018": 2, "demo_note_017": 1, "demo_note_020": 0}}
+  ]
+}

@@ -6,6 +6,8 @@ wherever the full schema must be registered.
 from __future__ import annotations
 
 from app.models.file_asset import FileAsset
+from app.models.discovery import DiscoveryFeedback, DiscoveryPost, DiscoveryPreference
+from app.models.discovery_embedding import DiscoveryEmbedding
 from app.models.file_asset_reference import FileAssetReference
 from app.models.generation_operation import GenerationOperation
 from app.models.plan import Plan
@@ -18,6 +20,10 @@ from app.models.user_memory import UserMemory
 from app.models.user_memory_event import UserMemoryEvent
 
 __all__ = [
+    "DiscoveryEmbedding",
+    "DiscoveryFeedback",
+    "DiscoveryPost",
+    "DiscoveryPreference",
     "FileAsset",
     "FileAssetReference",
     "GenerationOperation",

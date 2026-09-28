@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
-import { ArrowRight, Camera, FileText, Pencil, Plus, Route, Trash2, X } from "lucide-react"
+import { ArrowRight, Camera, FileText, Pencil, Plus, Route, Share2, Trash2, X } from "lucide-react"
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import { TopBar } from "@/components/shared/top-bar"
@@ -110,6 +110,7 @@ export function TripDetailView() {
         </div>}
       />
       <main className="trip-detail-main">
+        <Link className="trip-share-entry" href={"/discover/share?tripId=" + encodeURIComponent(trip.id)}><Share2 size={18} /><span>分享这次旅行</span><ArrowRight size={17} /></Link>
         <div className="trip-primary-actions">
           <Link href={`/create?tripId=${encodeURIComponent(trip.id)}`}><Camera size={18} />用照片创作</Link>
           <Link

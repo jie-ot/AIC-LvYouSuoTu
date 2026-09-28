@@ -79,6 +79,7 @@ function hrefForEntry(entry: NavEntry): string {
 }
 
 function parentHref(pathname: string): string {
+  if (pathname.startsWith("/discover/")) return "/discover"
   if (pathname === "/postcards/detail") return "/postcards"
   if (pathname === "/reports/detail") return "/reports"
   if (pathname === "/planning/history/detail") return "/planning/history"

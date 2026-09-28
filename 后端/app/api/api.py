@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     ai_planning,
+    discovery,
     generate,
     images,
     memories,
@@ -29,3 +30,4 @@ api_router.include_router(generate.router)
 api_router.include_router(ai_planning.router)
 api_router.include_router(memories.router)
 api_router.include_router(trips.router)
+api_router.include_router(discovery.router)

@@ -180,7 +180,7 @@ def chat_messages(
     max_completion_tokens: int = 16000,
     timeout_seconds: int | None = None,
     max_attempts: int | None = None,
-    planning_model: PlanningModel = DEFAULT_PLANNING_MODEL,
+    planning_model: PlanningModel | None = DEFAULT_PLANNING_MODEL,
     response_format: dict[str, str] | None = None,
     thinking_enabled: bool | None = None,
     reasoning_effort: str | None = None,

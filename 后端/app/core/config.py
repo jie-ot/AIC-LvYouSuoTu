@@ -43,6 +43,14 @@ class Settings(BaseSettings):
 
     # —— Auth / single-user demo ——
     DEFAULT_USER_ID: str = "demo_user_001"
+    DISCOVERY_DEMO_ENABLED: bool = True
+    DISCOVERY_SEMANTIC_ENABLED: bool = True
+    DISCOVERY_EMBEDDING_MODEL: str = "doubao-embedding-vision"
+    DISCOVERY_EMBEDDING_REVISION: str = "doubao-embedding-vision-251215"
+    DISCOVERY_EMBEDDING_DIMENSIONS: int = 1024
+    DISCOVERY_EMBEDDING_TIMEOUT_SECONDS: int = 25
+    DISCOVERY_EMBEDDING_BATCH_SIZE: int = 8
+    DISCOVERY_EMBEDDING_PARALLELISM: int = 3
 
     # —— Static storage ——
     STATIC_ROOT: str = "./static"

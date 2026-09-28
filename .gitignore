@@ -4,6 +4,9 @@
 !.env.example
 !.env.*.example
 
+# 文档类
+docs/
+
 # Node.js / Next.js
 node_modules/
 .pnpm-store/

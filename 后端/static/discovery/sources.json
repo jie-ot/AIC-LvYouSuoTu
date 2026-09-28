@@ -1,0 +1,92 @@
+[
+  {
+    "file": "hangzhou.jpg",
+    "city": "杭州",
+    "author": "一只猫的橘",
+    "source": "https://unsplash.com/photos/a-scenic-lake-with-a-bridge-and-distant-mountains-hU0U9k_2wrQ",
+    "image": "https://images.unsplash.com/photo-1757400734930-29fc0964066b?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "yangshuo.jpg",
+    "city": "阳朔",
+    "author": "Tom Rickhuss",
+    "source": "https://unsplash.com/photos/lake-surrounded-by-green-trees-and-mountains-during-daytime-I92Hg4K1J9o",
+    "image": "https://images.unsplash.com/photo-1580051720092-e5b00bb5582b?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "xiamen.jpg",
+    "city": "厦门",
+    "author": "Brian Zhu",
+    "source": "https://unsplash.com/photos/white-and-black-lighthouse-on-brown-rocky-shore-during-daytime-cYBTMJQVXi4",
+    "image": "https://images.unsplash.com/photo-1619079080172-1f713187d7e2?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "chengdu.jpg",
+    "city": "成都",
+    "author": "yimin ma",
+    "source": "https://unsplash.com/photos/people-seated-at-tables-under-a-covered-outdoor-seating-area-lny58iNNdHc",
+    "image": "https://images.unsplash.com/photo-1769570536785-750d0a7e781d?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "suzhou.jpg",
+    "city": "苏州",
+    "author": "Dominic Kurniawan Suryaputra",
+    "source": "https://unsplash.com/photos/a-canal-filled-with-lots-of-boats-next-to-buildings-0R2rHjjKWxM",
+    "image": "https://images.unsplash.com/photo-1726703276908-31607c1a261d?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "qingdao.jpg",
+    "city": "青岛",
+    "author": "XUE LIU",
+    "source": "https://unsplash.com/photos/a-view-of-the-ocean-from-a-hill-top--iOgXnpaZiQ",
+    "image": "https://images.unsplash.com/photo-1718442760186-93145df7bc8f?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "dali.jpg",
+    "city": "大理",
+    "author": "Wanghao SANG",
+    "source": "https://unsplash.com/photos/an-aerial-view-of-a-city-and-a-body-of-water-JBn3BGILAJM",
+    "image": "https://images.unsplash.com/photo-1725378673587-571798fc52a5?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "chongqing.jpg",
+    "city": "重庆",
+    "author": "Erin With",
+    "source": "https://unsplash.com/photos/a-narrow-city-street-lined-with-tall-buildings-IqeZVk5fznI",
+    "image": "https://images.unsplash.com/photo-1652773616019-ac583d2a4fa0?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "xian.jpg",
+    "city": "西安",
+    "author": "Yux Xiang",
+    "source": "https://unsplash.com/photos/the-sun-is-setting-over-the-city-skyline-zvVX7prwg4c",
+    "image": "https://images.unsplash.com/photo-1725933014999-e70ae6e57375?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  },
+  {
+    "file": "shanghai.jpg",
+    "city": "上海",
+    "author": "Declan Sun",
+    "source": "https://unsplash.com/photos/a-busy-city-street-with-tall-buildings-and-blue-sky-14iZqlWkAWM",
+    "image": "https://images.unsplash.com/photo-1752386452611-9e44530f5a54?w=1100&q=84&fit=max&fm=jpg",
+    "license": "https://unsplash.com/license",
+    "usage": "合成演示笔记的示意封面，非笔记作者拍摄"
+  }
+]

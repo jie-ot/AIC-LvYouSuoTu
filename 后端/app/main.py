@@ -40,6 +40,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     with Session(engine) as session:
         ensure_demo_baseline(session)
+        if settings.DISCOVERY_DEMO_ENABLED:
+            from app.services.discovery.demo import ensure_demo_posts
+
+            ensure_demo_posts(session)
 
     yield
 

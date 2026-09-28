@@ -1,10 +1,11 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Brain, FileText, Images, Map, Route } from "lucide-react";
+import { Brain, Compass, FileText, Images, Map, Route } from "lucide-react";
 export function BottomNav() {
   const path = usePathname();
   const items = [
+    { href: "/discover", label: "发现", icon: Compass, active: path.startsWith("/discover") },
     {
       href: "/",
       label: "旅行",
