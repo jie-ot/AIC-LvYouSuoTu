@@ -6,6 +6,8 @@ import { ArrowRight, CalendarDays, Camera, FileText, Map, Plus, Route, X } from 
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
 import { Modal } from "@/components/shared/modal"
+import { CollectionHeader } from "@/components/shared/collection-header"
+import { EmptyState } from "@/components/shared/empty-state"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 
 export function HomeView() {
@@ -14,15 +16,15 @@ export function HomeView() {
 
   return (
     <div className="app-page trips-page">
-      <header className="collection-header">
-        <div className="brand-mark" aria-label="旅有所图">旅有所图</div>
-        <div className="collection-title-row">
-          <h1>我的旅行</h1>
-          <button type="button" className="primary-quiet-button" onClick={() => setCreating(true)}>
-            <Plus size={17} aria-hidden />新建旅行
-          </button>
-        </div>
-      </header>
+      <CollectionHeader
+        section="旅行"
+        title="我的旅行"
+        description="把走过的路，收进自己的旅行集。"
+        count={trips.length ? `${trips.length} 次旅行` : undefined}
+        action={<button type="button" className="primary-quiet-button" onClick={() => setCreating(true)}>
+          <Plus size={17} aria-hidden />新建旅行
+        </button>}
+      />
 
       <main className="collection-main">
         {loadError.trips ? (
@@ -57,11 +59,14 @@ export function HomeView() {
             ))}
           </div>
         ) : (
-          <section className="plain-state empty-trip-state">
-            <Map size={28} aria-hidden />
-            <p>还没有旅行</p>
-            <button type="button" onClick={() => setCreating(true)}>新建旅行</button>
-          </section>
+          <EmptyState
+            icon={<Map size={28} aria-hidden />}
+            title="从一段旅行开始"
+            description="用照片留住回忆，或为下一次出发做个计划。"
+          >
+            <Link href="/create" className="primary-action"><Camera size={17} aria-hidden />用照片创建</Link>
+            <Link href="/planning" className="secondary-action"><Route size={17} aria-hidden />规划新旅行</Link>
+          </EmptyState>
         )}
       </main>
 

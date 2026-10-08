@@ -997,7 +997,7 @@ a:active {
 }
 .empty-actions button,
 .empty-actions a {
-  border-radius: 5px !important;
+  border-radius: var(--radius-compact);
 }
 .travel-loader {
   display: flex;

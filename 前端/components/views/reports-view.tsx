@@ -7,6 +7,7 @@ import { BottomNav } from "@/components/shared/bottom-nav";
 import { ActionMenu } from "@/components/shared/action-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { EmptyState } from "@/components/shared/empty-state";
+import { CollectionHeader } from "@/components/shared/collection-header";
 import {
   PLACEHOLDER_IMAGE,
   handleImageError,
@@ -19,14 +20,13 @@ export function ReportsView() {
   const [pending, setPending] = useState<Report | null>(null);
   return (
     <div className="app-page archive-page">
-      <header className="collection-header">
-        <div className="brand-mark">旅有所图</div>
-        <div className="collection-title-row">
-          <h1>旅行人格报告</h1>
-          <Link href="/create?mode=report" className="primary-quiet-button"><Plus size={17} />生成</Link>
-        </div>
-        <p className="collection-count">{reports.length} 份</p>
-      </header>
+      <CollectionHeader
+        section="报告"
+        title="旅行人格报告"
+        description="从镜头里的风景，认识旅行中的自己。"
+        count={reports.length ? `${reports.length} 份报告` : undefined}
+        action={<Link href="/create?mode=report" className="primary-quiet-button"><Plus size={17} aria-hidden />生成报告</Link>}
+      />
       <main className="archive-scroll">
         {reports.length ? (
           <div className="persona-archive">
@@ -80,6 +80,7 @@ export function ReportsView() {
           <EmptyState
             icon={<FileText size={28} />}
             title="还没有旅行人格报告"
+            description="上传至少 10 张旅行照片，看看你这次旅行的独特气质。"
           >
             <Link href="/create?mode=report" className="primary-action">
               上传照片

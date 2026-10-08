@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react"
 import { BottomNav } from "@/components/shared/bottom-nav"
+import { CollectionHeader } from "@/components/shared/collection-header"
 import { useApp } from "@/components/shared/app-context"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import {
@@ -99,14 +100,14 @@ export function TravelMemoryView() {
 
   return (
     <div className="app-page memory-page">
-      <header className="memory-header">
-        <div className="collection-title-row">
-          <h1>旅行记忆</h1>
-          <button type="button" className="primary-quiet-button" onClick={() => setAdding(true)}>
-            <Plus size={18} aria-hidden />添加要求
-          </button>
-        </div>
-      </header>
+      <CollectionHeader
+        section="记忆"
+        title="旅行记忆"
+        description="记住你的喜好，让下一程更合心意。"
+        action={<button type="button" className="primary-quiet-button" onClick={() => setAdding(true)}>
+          <Plus size={17} aria-hidden />添加要求
+        </button>}
+      />
 
       <main className="memory-main">
         {loading ? <div className="plain-state"><p>正在读取…</p></div> : null}
