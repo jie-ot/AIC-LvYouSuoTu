@@ -102,7 +102,7 @@ def classify_schedule(
 
     if _has_any(text, _TRANSPORT_HUB):
         return "transport"
-    if _is_hotel_text(text):
+    if _is_hotel_text(text) and (not schedule.place_name or _has_any(schedule.place_name, _HOTEL_NAME)):
         return "hotel"
     if _has_any(text, _DINING_NAME):
         return "dining"
@@ -116,6 +116,17 @@ def fact_for_schedule(
 ) -> dict[str, Any] | None:
     if not facts:
         return None
+    # A row can cite a transfer route first and its destination POI second.
+    # Classify the destination, not the hotel mentioned as the starting point.
+    for ref in schedule.fact_refs:
+        fact = facts.get(ref)
+        if not isinstance(fact, dict) or not fact.get("name"):
+            continue
+        name = str(fact["name"])
+        if (schedule.location and fact.get("location") == schedule.location) or (
+            schedule.place_name and (name == schedule.place_name or name in schedule.place_name)
+        ):
+            return fact
     for ref in schedule.fact_refs:
         fact = facts.get(ref)
         if isinstance(fact, dict):

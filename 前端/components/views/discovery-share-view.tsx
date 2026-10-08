@@ -10,6 +10,7 @@ import { DiscoveryDialog, NoteBody, TagPicker } from "@/components/discovery/sha
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 import { uploadImage } from "@/lib/api"
 import { preparePhotoForUpload } from "@/lib/upload-photo"
+import { newRequestId } from "@/lib/request-id"
 import { DISCOVERY_TAGS, assistDiscoveryNote, getShareOptions, publishDiscoveryPost, type AssistResult, type ShareInput, type ShareOptions } from "@/lib/discovery-api"
 
 function toggle(list: string[], id: string) { return list.includes(id) ? list.filter((item) => item !== id) : [...list, id] }
@@ -44,7 +45,7 @@ function ShareForm({ options }: { options: ShareOptions }) {
         setDraft(restored.draft)
         if (Array.isArray(restored.photos)) setPhotos(restored.photos)
       }
-      requestId.current = restored?.draft?.requestId || crypto.randomUUID()
+      requestId.current = restored?.draft?.requestId || newRequestId()
       setHydrated(true)
     }, 0)
     return () => window.clearTimeout(task)

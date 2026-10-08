@@ -8,6 +8,7 @@ import './journal.css'
 import './editorial.css'
 import './persona.css'
 import './discovery.css'
+import './interaction.css'
 
 export const metadata: Metadata = {
   title: '旅有所图',

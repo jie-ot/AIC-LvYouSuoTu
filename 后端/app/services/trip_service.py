@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from app.core.exceptions import InvalidParamError, NotFoundError
@@ -170,28 +170,27 @@ def list_trips(session: Session, user_id: str) -> list[dto.TripSummary]:
     trip_ids = {trip.id for trip in trips}
     if not trip_ids:
         return []
-    plans = session.exec(select(Plan).where(Plan.user_id == user_id)).all()
-    groups = session.exec(select(PostcardGroup).where(PostcardGroup.user_id == user_id)).all()
-    reports = session.exec(select(Report).where(Report.user_id == user_id)).all()
-    postcards = session.exec(select(Postcard).where(Postcard.user_id == user_id)).all()
-    group_trip = {group.id: group.trip_id for group in groups}
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"plans": 0, "postcards": 0, "reports": 0})
-    for plan in plans:
-        if plan.trip_id in trip_ids:
-            counts[str(plan.trip_id)]["plans"] += 1
-    for report in reports:
-        if report.trip_id in trip_ids:
-            counts[str(report.trip_id)]["reports"] += 1
-    for postcard in postcards:
-        trip_id = group_trip.get(postcard.group_id)
-        if trip_id in trip_ids:
-            counts[str(trip_id)]["postcards"] += 1
+    # The collection only needs counts, not complete itinerary/report JSON.
+    plan_counts = dict(session.exec(
+        select(Plan.trip_id, func.count(Plan.id))
+        .where(Plan.user_id == user_id).group_by(Plan.trip_id)
+    ).all())
+    report_counts = dict(session.exec(
+        select(Report.trip_id, func.count(Report.id))
+        .where(Report.user_id == user_id).group_by(Report.trip_id)
+    ).all())
+    postcard_counts = dict(session.exec(
+        select(PostcardGroup.trip_id, func.count(Postcard.id))
+        .join(Postcard, Postcard.group_id == PostcardGroup.id)
+        .where(PostcardGroup.user_id == user_id, Postcard.user_id == user_id)
+        .group_by(PostcardGroup.trip_id)
+    ).all())
     return [
         _summary(
             trip,
-            plan_count=counts[trip.id]["plans"],
-            postcard_count=counts[trip.id]["postcards"],
-            report_count=counts[trip.id]["reports"],
+            plan_count=plan_counts.get(trip.id, 0),
+            postcard_count=postcard_counts.get(trip.id, 0),
+            report_count=report_counts.get(trip.id, 0),
         )
         for trip in trips
     ]
@@ -213,13 +212,17 @@ def get_trip(session: Session, user_id: str, trip_id: str) -> dto.TripDetail:
     ).all())
     group_dtos = []
     postcard_count = 0
+    postcards_by_group: dict[str, list[Postcard]] = defaultdict(list)
+    if groups:
+        for postcard in session.exec(
+            select(Postcard).join(PostcardGroup, Postcard.group_id == PostcardGroup.id)
+            .where(Postcard.user_id == user_id, PostcardGroup.user_id == user_id,
+                   PostcardGroup.trip_id == trip_id)
+            .order_by(Postcard.sort_order.asc(), Postcard.id.asc())
+        ).all():
+            postcards_by_group[postcard.group_id].append(postcard)
     for group in groups:
-        postcards = list(session.exec(
-            select(Postcard).where(
-                Postcard.user_id == user_id,
-                Postcard.group_id == group.id,
-            ).order_by(Postcard.sort_order.asc())
-        ).all())
+        postcards = postcards_by_group[group.id]
         postcard_count += len(postcards)
         group_dtos.append(mappers.postcard_group_to_dto(group, postcards))
     summary = _summary(
@@ -228,6 +231,10 @@ def get_trip(session: Session, user_id: str, trip_id: str) -> dto.TripDetail:
         postcard_count=postcard_count,
         report_count=len(reports),
     )
+    paths = file_asset_service.list_reference_paths_by_owner(
+        session, user_id=user_id, owner_type="report",
+        owner_ids=[report.id for report in reports], role="source_photo",
+    )
     return dto.TripDetail(
         **summary.model_dump(),
         plans=[mappers.plan_to_dto(plan) for plan in plans],
@@ -235,13 +242,7 @@ def get_trip(session: Session, user_id: str, trip_id: str) -> dto.TripDetail:
         reports=[
             mappers.report_to_dto(
                 report,
-                source_images=file_asset_service.list_reference_paths(
-                    session,
-                    user_id=user_id,
-                    owner_type="report",
-                    owner_id=report.id,
-                    role="source_photo",
-                ),
+                source_images=paths.get(report.id, []),
             )
             for report in reports
         ],

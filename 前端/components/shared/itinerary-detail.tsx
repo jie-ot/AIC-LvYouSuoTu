@@ -200,18 +200,18 @@ export function ItineraryDetail({
         ) : null}
 
         {memory_context ? (
-          <section className="itinerary-memory-evidence" aria-label="本次规划的旅行记忆依据">
-            <div className="itinerary-memory-heading"><Brain size={18} aria-hidden /><h2>这份行程参考了什么记忆</h2></div>
+          <details className="itinerary-memory-evidence" aria-label="本次规划的旅行记忆依据">
+            <summary className="itinerary-memory-heading"><Brain size={18} aria-hidden /><span>{memory_context.enabled && memory_context.selected.length ? "已参考旅行记忆" : "本次规划依据"}</span></summary>
             {!memory_context.enabled ? <p>这次规划没有使用已保存的旅行记忆。</p> :
-              memory_context.selected.length === 0 ? <p>本次没有选到适用的已确认记忆，行程按你这次的要求规划。</p> : (
+              memory_context.selected.length === 0 ? <p>这次的行程按你当前的要求规划。</p> : (
                 <>
-                  <p>以下是提供给规划器的已确认要求。你本次明确提出的要求始终优先。</p>
+                  <p>自动整理的线索和你表达的长期要求，本次需求始终优先。</p>
                   <ul className="itinerary-memory-list">
                     {memory_context.selected.map((item) => {
                       const linked = (memory_basis ?? []).filter((basis) => basis.memory_id === item.id)
                       return <li key={item.id}>
                         <strong>{item.text}</strong>
-                        <span>{item.source_trip_id ? <Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_id)}&from=memory`}>{item.source_trip_title ?? "查看来源旅行"}</Link> : item.source_kind === "observed_pattern" && item.source_trip_ids?.length ? <><Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_ids[0])}&from=memory`}>查看来源旅行</Link> · 根据 {item.source_trip_ids.length} 次旅行由你确认</> : "由你保存的旅行要求"}</span>
+                        <span>{item.source_kind === "automatic_observation" ? <>从旅行照片自动整理{item.source_trip_ids?.length ? <> · <Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_ids[0])}&from=memory`}>查看来源旅行</Link></> : null}</> : item.source_trip_id ? <Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_id)}&from=memory`}>{item.source_trip_title ?? "查看来源旅行"}</Link> : item.source_kind === "observed_pattern" && item.source_trip_ids?.length ? <><Link href={`/trips/detail?tripId=${encodeURIComponent(item.source_trip_ids[0])}&from=memory`}>查看来源旅行</Link> · 根据 {item.source_trip_ids.length} 次旅行由你确认</> : item.source_kind === "explicit_conversation" ? "你在对话中表达的长期要求" : "由你保存的旅行要求"}</span>
                         {item.source_photos?.length ? <div className="itinerary-memory-photos" aria-label="这条记忆的来源照片">
                           {item.source_photos.slice(0, 4).map((photo) => <a key={photo.asset_id} href={resolveAssetUrl(photo.image_url)} target="_blank" rel="noreferrer" aria-label="查看来源照片"><img src={resolveAssetUrl(photo.image_url)} alt="来源旅行照片" onError={handleImageError} /></a>)}
                         </div> : null}
@@ -226,7 +226,7 @@ export function ItineraryDetail({
                   <Link className="itinerary-memory-manage" href="/memory">检查或修改旅行记忆</Link>
                 </>
               )}
-          </section>
+          </details>
         ) : null}
 
         {(preparations.length > 0 ||
@@ -723,12 +723,10 @@ function ScheduleCard({
               路程 {schedule.travel_minutes} 分钟
             </span>
           ) : null}
-          {/* 后端核对未通过的那几条会标成 unverified。这个提示不能藏在“展开详情”
-              里——按错的时刻去买票，是看不到才会犯的错。 */}
           {schedule.fact_status === "unverified" ? (
             <span className="itinerary-unconfirmed">
               <TriangleAlert className="size-3" aria-hidden />
-              时刻待确认
+              {schedule.transport?.includes("时刻待确认") || schedule.transport?.includes("具体钟点待班次核实") ? "时刻待确认" : "出行前核对"}
             </span>
           ) : null}
         </div>

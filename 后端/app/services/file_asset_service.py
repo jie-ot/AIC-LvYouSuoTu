@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import event
 from sqlmodel import Session, select
 
 from app.core.exceptions import InvalidParamError
@@ -29,6 +30,35 @@ SYSTEM_USER_ID = "system"
 STATUS_TEMPORARY = "temporary"
 STATUS_ATTACHED = "attached"
 STATUS_DELETED = "deleted"
+
+_PENDING_DELETES = "file_asset_pending_deletes"
+
+
+@event.listens_for(Session, "after_commit")
+def _delete_committed_files(session: Session) -> None:
+    """Keep irreversible disk changes outside the business transaction."""
+    pending = session.info.get(_PENDING_DELETES, {})
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    paths = pending.pop(transaction, set())
+    if transaction is not None and transaction.nested:
+        pending.setdefault(transaction.parent, set()).update(paths)
+        return
+    session.info.pop(_PENDING_DELETES, None)
+    from app.services import storage_service
+
+    for path in paths:
+        try:
+            storage_service.delete_physical_file(path)
+        except Exception:  # A cleanup failure must not undo a successful response.
+            logger.warning("Committed asset cleanup deferred: %s", path, exc_info=True)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _discard_uncommitted_deletes(session: Session, transaction) -> None:  # noqa: ANN001
+    pending = session.info.get(_PENDING_DELETES, {})
+    pending.pop(transaction, None)
+    if transaction.parent is None:
+        session.info.pop(_PENDING_DELETES, None)
 
 
 def create_temporary(
@@ -71,26 +101,36 @@ def list_reference_paths(
     role: str,
 ) -> list[str]:
     """Return usable asset paths for one owned business record, in attach order."""
+    return list_reference_paths_by_owner(
+        session, user_id=user_id, owner_type=owner_type, owner_ids=[owner_id], role=role,
+    ).get(owner_id, [])
+
+
+def list_reference_paths_by_owner(
+    session: Session, *, user_id: str, owner_type: str, owner_ids: list[str], role: str,
+) -> dict[str, list[str]]:
+    """Read ordered paths in one query without loading each asset separately."""
+    if not owner_ids:
+        return {}
     references = session.exec(
-        select(FileAssetReference)
+        select(FileAssetReference.owner_id, FileAsset.relative_path)
+        .join(FileAsset, FileAsset.id == FileAssetReference.asset_id)
         .where(
             FileAssetReference.user_id == user_id,
             FileAssetReference.owner_type == owner_type,
-            FileAssetReference.owner_id == owner_id,
+            FileAssetReference.owner_id.in_(owner_ids),
             FileAssetReference.role == role,
+            FileAsset.status != STATUS_DELETED,
+            FileAsset.user_id.in_([user_id, SYSTEM_USER_ID]),
         )
-        .order_by(FileAssetReference.created_at.asc())
+        .order_by(FileAssetReference.created_at.asc(), FileAssetReference.id.asc())
     ).all()
-    paths: list[str] = []
-    for reference in references:
-        asset = session.get(FileAsset, reference.asset_id)
-        if (
-            asset is not None
-            and asset.status != STATUS_DELETED
-            and asset.user_id in {user_id, SYSTEM_USER_ID}
-        ):
-            paths.append(asset.relative_path)
-    return list(dict.fromkeys(paths))
+    result: dict[str, list[str]] = {}
+    for owner_id, path in references:
+        paths = result.setdefault(owner_id, [])
+        if path not in paths:
+            paths.append(path)
+    return result
 
 
 def attach_with_reference(
@@ -192,14 +232,12 @@ def recompute_ref_count(session: Session, asset_id: str) -> int:
 
 
 def safe_delete_if_unreferenced(session: Session, asset_id: str) -> bool:
-    """Physically delete an asset only if it has no references.
+    """Mark an unreferenced asset deleted and clean its file after commit.
 
     Re-queries the reference table (never trusts the cached count alone). System
     assets are skipped. Missing physical files do not crash the caller. Returns
-    True if the asset was physically removed / marked deleted.
+    True if the asset was marked deleted. Rollback preserves the physical file.
     """
-    from app.services import storage_service
-
     asset = session.get(FileAsset, asset_id)
     if asset is None:
         return False
@@ -210,14 +248,17 @@ def safe_delete_if_unreferenced(session: Session, asset_id: str) -> bool:
     if count > 0:
         return False
 
-    # No references: remove physical file (tolerate missing) and mark deleted.
-    storage_service.delete_physical_file(asset.relative_path)
+    # The row and references may still roll back; disk removal must wait.
     asset.status = STATUS_DELETED
     from app.models.base import utcnow
 
     asset.deleted_at = utcnow()
     session.add(asset)
     session.flush()
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    session.info.setdefault(_PENDING_DELETES, {}).setdefault(transaction, set()).add(
+        asset.relative_path
+    )
     return True
 
 

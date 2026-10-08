@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, TypeVar
 
+from app.core import generation_progress
+
 _current_log: contextvars.ContextVar["BusinessLog | None"] = contextvars.ContextVar(
     "business_log",
     default=None,
@@ -50,6 +52,7 @@ class BusinessLog:
         message: str | None = None,
         **fields: Any,
     ) -> None:
+        generation_progress.observe(event, status, fields)
         payload = {
             "ts": datetime.now().isoformat(timespec="milliseconds"),
             "elapsed_ms": self.elapsed_ms(),

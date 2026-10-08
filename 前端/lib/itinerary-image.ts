@@ -188,7 +188,7 @@ function timeLabel(schedule: Schedule): string {
   if (start && end) {
     const range = formatScheduleTimeRange(start, end)
     const stay = classifySchedule(schedule) === "transport" ? null : stayLabel(start, end)
-    return stay ? `${range}（停留 ${stay}）` : range
+    return stay ? `${range}（${stay}）` : range
   }
   if (start) return start
   return cleanText(schedule.time_period) || "灵活"
@@ -244,7 +244,7 @@ function schedulePlace(schedule: Schedule): string {
   const source = cleanText(schedule.place_name || schedule.activity)
   const kind = classifySchedule(schedule)
   const stripped = stripSensitiveDetail(source)
-  if (kind === "hotel") {
+  if (kind === "hotel" && /酒店|宾馆|客栈|民宿|旅馆|度假村/u.test(source)) {
     if (/退房/u.test(schedule.activity || "")) return stripped ? `退房 ${stripped}` : "办理退房"
     if (/入住/u.test(schedule.activity || "")) return stripped ? `入住 ${stripped}` : "办理入住"
   }

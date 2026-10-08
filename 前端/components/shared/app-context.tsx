@@ -30,6 +30,7 @@ import {
   type PlanWithAIInput,
 } from "@/lib/api"
 import { readPhotoMeta } from "@/lib/exif"
+import { newRequestId } from "@/lib/request-id"
 import { preparePhotoForUpload, UPLOAD_LIMIT_BYTES } from "@/lib/upload-photo"
 import { AppError, CODE_MESSAGE, friendlyMessage, type BusinessErrorCode } from "@/lib/errors"
 import type { ItineraryData, UploadedPhoto } from "@/types"
@@ -113,6 +114,8 @@ export interface GenerateArtifactsInput {
 export type GenerationPhase = "preparing" | "uploading" | "creating"
 
 export interface GenerationProgress {
+  requestId: string
+  startedAt: number
   phase: GenerationPhase
   completed: number
   total: number
@@ -557,8 +560,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       tripId,
       options,
     }: GenerateArtifactsInput): Promise<GenerateResult | null> => {
+      const progressBase = { requestId: clientRequestId ?? newRequestId(), startedAt: Date.now() }
       setGenerating(true)
       setGenerationProgress({
+        ...progressBase,
         phase: "preparing",
         completed: 0,
         total: files.length,
@@ -568,6 +573,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // 每张照片：读 EXIF（失败置 null，不报错）→ 上传 → 拼装 UploadedPhoto
         // 上传走并发限流 + 单张重试（详见 uploadAllPhotos），支持一次最多 50 张且更抗抖动
         setGenerationProgress({
+          ...progressBase,
           phase: "uploading",
           completed: 0,
           total: files.length,
@@ -575,6 +581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         })
         const photos = await uploadAllPhotos(files, (completed, total) => {
           setGenerationProgress({
+            ...progressBase,
             phase: "uploading",
             completed,
             total,
@@ -583,6 +590,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         })
 
         setGenerationProgress({
+          ...progressBase,
           phase: "creating",
           completed: files.length,
           total: files.length,
@@ -593,7 +601,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           requirements,
           memoryRequirements,
           options,
-          clientRequestId: clientRequestId ?? crypto.randomUUID(),
+          clientRequestId: progressBase.requestId,
           tripId,
         })
         // 固定返回 { postcardGroup, report }；通过 if 判断追加，不依赖字段缺失

@@ -4,8 +4,15 @@
 !.env.example
 !.env.*.example
 
-# 文档类
+# 文档类、测试与浏览器
 docs/
+QUALITY_REVIEW.md
+后端/tests/
+前端/tests/
+.playwright-cli/
+playwright-report/
+test-results/
+output/
 
 # Node.js / Next.js
 node_modules/
@@ -40,11 +47,6 @@ pnpm-debug.log*
 *.keystore
 keystore.properties
 google-services.json
-
-# Browser test outputs
-.playwright-cli/
-playwright-report/
-test-results/
 
 # Python
 __pycache__/
@@ -81,7 +83,6 @@ htmlcov/
 /后端/e2e_results/
 /后端/scripts/*
 !/后端/scripts/seed_demo.py
-
 
 # Packaging artifacts and local delivery bundles
 *.apk

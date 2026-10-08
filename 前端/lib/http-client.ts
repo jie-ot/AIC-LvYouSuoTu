@@ -19,6 +19,7 @@ interface ApiEnvelope<T> {
 }
 
 const KNOWN_CODES: BusinessErrorCode[] = [1001, 1002, 1003, 1004]
+const READ_TIMEOUT_MS = 20_000
 
 function normalizeCode(code: number): BusinessErrorCode {
   return (KNOWN_CODES as number[]).includes(code) ? (code as BusinessErrorCode) : 1003
@@ -39,6 +40,32 @@ function buildUrl(path: string): string {
  * @param path 以 / 开头的接口路径（不含 base，不含 /api 重复前缀）
  */
 export async function apiClient<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase()
+  // A stalled history read must not keep the entire application covered by
+  // its loading overlay. AI generation and other writes retain their lifetime.
+  if (method !== "GET" && method !== "HEAD") return requestEnvelope<T>(path, init)
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  if (init?.signal?.aborted) cancel()
+  init?.signal?.addEventListener("abort", cancel, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      requestEnvelope<T>(path, { ...init, signal: controller.signal }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          reject(new AppError(1003))
+        }, READ_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+    init?.signal?.removeEventListener("abort", cancel)
+  }
+}
+
+async function requestEnvelope<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
     res = await fetch(buildUrl(path), init)

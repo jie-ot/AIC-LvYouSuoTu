@@ -44,6 +44,7 @@ from app.ai.schemas import (
     PostcardCritiqueResult,
     PostcardPlanItem,
     PostcardPlanResult,
+    PostcardRevisionDecision,
     PostcardSelectionResult,
     PostcardTypeStyle,
     ReportCopyResult,
@@ -765,6 +766,7 @@ def create_postcard_creative_plan(
             candidates=candidates,
             expected_sources=expected_sources,
             errors=errors,
+            available_asset_ids=selected_set,
         )
         if errors:
             data_url_by_asset = dict(zip(selected_asset_ids, image_data_urls, strict=True))
@@ -795,6 +797,7 @@ def create_postcard_creative_plan(
             candidates=candidates,
             expected_sources=expected_sources,
             errors=final_errors,
+            available_asset_ids=selected_set,
         )
         if final_errors:
             for index in final_errors:
@@ -892,32 +895,14 @@ def _parse_postcard_plan_candidates(
 def _normalize_postcard_image_prompt(
     item: PostcardPlanItem, *, item_index: int,
 ) -> PostcardPlanItem:
-    """Compile a safe image brief; editorial omissions do not need another model call."""
-    prompt = _remove_postcard_copy_directives(item.image_prompt.strip())
-    if len(prompt) > 360:
-        prompt = prompt[:360].rstrip("，,；;。 ") + "。"
-
-    additions: list[str] = []
-    if len(prompt) < 140:
-        additions.extend((
-            f"照片处理：{item.photo_transformation.strip()}",
-            f"核心构思：{item.design_concept.strip()}",
-            f"画面装置：{item.visual_device.strip()}",
-            f"系列线索：{item.series_motif.strip()}",
-        ))
-    expected_ratio = _POSTCARD_FORMAT_RATIOS[item.canvas_format].split()[-1]
-    if expected_ratio not in prompt:
-        additions.insert(0, f"按所选 {expected_ratio} 比例构图。")
-    normalized = prompt
-    for addition in additions:
-        if len(normalized) >= 140:
-            break
-        if addition in normalized:
-            continue
-        separator = "\n" if normalized else ""
-        if len(normalized) + len(separator) + len(addition) > 400:
-            continue
-        normalized += separator + addition
+    """Preserve art direction and map stable asset references to local indices."""
+    normalized = _remove_no_text_instructions(item.image_prompt.strip())
+    for index, asset_id in enumerate(item.source_asset_ids, start=1):
+        normalized = normalized.replace(f"[[{asset_id}]]", f"图片{index}")
+    if len(item.source_asset_ids) == 1:
+        normalized = _localize_postcard_image_reference(normalized)
+    # Clause filtering discarded placement and lettering in the paid ablation.
+    # Preserve complete briefs without padding or arbitrary character cutoffs.
     if normalized != item.image_prompt:
         log_event(
             "postcard_creative_prompt_normalized",
@@ -980,13 +965,14 @@ def _collect_postcard_plan_validation_errors(
     candidates: list[PostcardPlanItem | None],
     expected_sources: list[list[str]],
     errors: dict[int, list[str]],
+    available_asset_ids: set[str] | None = None,
 ) -> None:
     """Collect item-local and cross-item errors without discarding valid items."""
     for index, expected in enumerate(expected_sources):
         item = candidates[index]
         if item is None:
             continue
-        item_errors = _postcard_plan_item_errors(item, expected)
+        item_errors = _postcard_plan_item_errors(item, expected, available_asset_ids)
         if item_errors:
             errors.setdefault(index, []).extend(item_errors)
 
@@ -994,13 +980,31 @@ def _collect_postcard_plan_validation_errors(
 def _postcard_plan_item_errors(
     item: PostcardPlanItem,
     expected_source_asset_ids: list[str],
+    available_asset_ids: set[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
-    if item.source_asset_ids != expected_source_asset_ids:
+    sources = item.source_asset_ids
+    if available_asset_ids is None and sources != expected_source_asset_ids:
         errors.append(
             "source_asset_ids 必须为 "
             + json.dumps(expected_source_asset_ids, ensure_ascii=False)
         )
+    elif available_asset_ids is not None:
+        if (
+            not 1 <= len(sources) <= 3
+            or len(set(sources)) != len(sources)
+            or not set(sources).issubset(available_asset_ids)
+        ):
+            errors.append("source_asset_ids 必须从已提供的候选原图中选择 1–3 个不重复 ID")
+        if not sources or sources[0] != expected_source_asset_ids[0]:
+            errors.append(f"第一张主素材必须为 {expected_source_asset_ids[0]}")
+    if len(sources) > 1 and item.composition_mode != "multi_photo_collage":
+        errors.append("多图组合的 composition_mode 必须为 multi_photo_collage")
+    if item.composition_mode == "multi_photo_collage" and len(sources) < 2:
+        errors.append("multi_photo_collage 需要至少两张不同的原图")
+    if item.composition_mode != "scene_preserving" or item.subject_focus:
+        if len(item.subject_focus) != len(sources) or not all(x.strip() for x in item.subject_focus):
+            errors.append("subject_focus 必须按 source_asset_ids 顺序写明每张图提取的主体")
     title = item.title.strip()
     if not title:
         errors.append("标题不能为空")
@@ -1010,6 +1014,13 @@ def _postcard_plan_item_errors(
     if item.emblem_style != "none" and not 1 <= len(emblem_text) <= 8:
         errors.append("启用原创徽记时 emblem_text 必须为 1–8 个字")
     image_prompt = item.image_prompt.strip()
+    if not image_prompt:
+        errors.append("image_prompt 不能为空")
+    if re.search(r"\[\[.*?\]\]", image_prompt):
+        errors.append("image_prompt 引用了未选择的素材；引用只允许来自本张 source_asset_ids")
+    references = re.findall(r"(?:图片|图像|Image)\s*(\d+)", image_prompt, re.I)
+    if any(not 1 <= int(number) <= len(sources) for number in references):
+        errors.append("image_prompt 的图片编号超出本张原图数量")
     approved_copy = [title, *item.extra_texts, emblem_text, image_prompt]
     if _contains_forbidden_postcard_brand(approved_copy):
         errors.append("标题、辅助文字、徽记及图片提示中不得出现固定产品品牌")
@@ -1017,29 +1028,24 @@ def _postcard_plan_item_errors(
 
 
 def _remove_no_text_instructions(value: str) -> str:
-    """Discard stale art-brief clauses that reserve copy for a local renderer."""
-    clauses = re.split(r"(?<=[。；;！!？?\n])", value)
+    """Remove obsolete delivery instructions without deleting art direction."""
     forbidden = re.compile(
-        r"(?:底图|画面|最终|全图|成图)?.{0,8}(?:无可读文字|"
+        r"(?:底图|画面|最终|全图|成图)?(?:中|上)?(?:必须|应当|应)?(?:保持)?"
+        r"(?:无可读文字|"
         r"不出现(?:任何)?文字|不得(?:添加|出现|生成)(?:任何|可读)?文字|"
-        r"不生成文字|不绘制字形|不要文字|无文字)|"
-        r"(?:标题|文字).{0,12}由(?:后端|本地).{0,12}(?:叠加|排版|绘制)"
+        r"不生成文字|不绘制字形|不要文字|无文字)(?=[。；;，,！!？?\n]|$)|"
+        r"(?:标题|文字)(?:将|会)?由(?:后端|本地)(?:统一|程序|负责|后续)*"
+        r"(?:叠加|排版|绘制)"
     )
-    return "".join(clause for clause in clauses if not forbidden.search(clause)).strip()
+    return forbidden.sub("", value).strip().lstrip("。；;，, ")
 
 
-def _remove_postcard_copy_directives(value: str) -> str:
-    """Keep the art brief, but supply all exact copy in one authoritative clause."""
-    clauses = re.split(r"(?<=[。；;！!？?\n])", _remove_no_text_instructions(value))
-    copy_directive = re.compile(
-        r"(?:添加|写|绘制|呈现|出现|印上|印在|放(?:置|一个)?|保留)"
-        r".{0,18}(?:标题|文字|字样|汉字|字母|二字|中文)|"
-        r"(?:标题|文字|字样|汉字|字母|二字|中文)"
-        r".{0,18}(?:添加|写|绘制|呈现|出现|印上|印在|放)|"
-        r"(?:字样|汉字|二字|英文字母)",
-        flags=re.IGNORECASE,
+def _localize_postcard_image_reference(value: str) -> str:
+    """Translate batch image numbers to the image model's one-image input."""
+    return re.sub(
+        r"(?:图片|图像|参考图|Image)\s*[0-9一二三四五六七八九十]+",
+        "图片1", value, flags=re.IGNORECASE,
     )
-    return "".join(clause for clause in clauses if not copy_directive.search(clause)).strip()
 
 
 def _contains_forbidden_postcard_brand(values: list[str]) -> bool:
@@ -1060,7 +1066,7 @@ def _retry_postcard_creative_item(
 ) -> PostcardPlanItem:
     """Regenerate one invalid postcard creative exactly once."""
     selected = selection.items[index]
-    source_asset_ids = list(selected.source_asset_ids)
+    source_asset_ids = list(data_url_by_asset)
     source_set = set(source_asset_ids)
     item_analysis = PhotoAnalysisResult(
         photos=[item for item in analysis.photos if item.asset_id in source_set],
@@ -1105,7 +1111,9 @@ def _retry_postcard_creative_item(
         item = candidates[0]
         retry_errors = list(parse_errors.get(0, []))
         if item is not None:
-            retry_errors.extend(_postcard_plan_item_errors(item, source_asset_ids))
+            retry_errors.extend(_postcard_plan_item_errors(
+                item, selected.source_asset_ids, set(source_asset_ids),
+            ))
         if item is None or retry_errors:
             raise AIGenerationError(
                 f"第 {index + 1} 张明信片创意定向重试失败："
@@ -1211,6 +1219,8 @@ def render_postcard_image(
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
+    composition_mode: str = "scene_preserving",
+    subject_focus: list[str] | None = None,
 ) -> ImageGenerationResult:
     """Generate one postcard image (image-to-image)."""
     edit_instruction = prompt.strip()
@@ -1231,6 +1241,9 @@ def render_postcard_image(
         extra_texts=extra_texts,
         emblem_style=emblem_style,
         emblem_text=emblem_text,
+        composition_mode=composition_mode,
+        subject_focus=subject_focus,
+        reference_image_count=len(image_data_urls),
     )
     log_event(
         "postcard_image_prompt",
@@ -1262,6 +1275,9 @@ def render_postcard_image(
             extra_texts=extra_texts,
             emblem_style=emblem_style,
             emblem_text=emblem_text,
+            composition_mode=composition_mode,
+            subject_focus=subject_focus,
+            reference_image_count=len(image_data_urls),
         )
         log_event(
             "postcard_image_input_policy_retry",
@@ -1288,6 +1304,9 @@ def _sanitized_postcard_image_prompt(
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
+    composition_mode: str = "scene_preserving",
+    subject_focus: list[str] | None = None,
+    reference_image_count: int = 1,
 ) -> str:
     """Return a minimal fallback prompt for one input-policy retry."""
     format_label = _POSTCARD_FORMAT_RATIOS.get(canvas_format, "横版 3:2")
@@ -1299,8 +1318,9 @@ def _sanitized_postcard_image_prompt(
         placement="构图选定的安全区域",
     )
     return (
-        f"Create a bold contemporary {format_label} travel postcard from Image 1. "
-        "Keep its people, terrain, architecture and factual identity recognizable. "
+        f"Create a contemporary {format_label} travel postcard from the supplied images. "
+        + _postcard_source_contract(composition_mode, subject_focus, reference_image_count)
+        + " Keep the selected subjects recognizable. "
         "Use a decisive photo-specific crop, source-derived graphic rhythm and "
         "refined print texture. Do not invent people, landmarks, commercial brands "
         f"or events. {text_instruction}"
@@ -1325,78 +1345,69 @@ def _compose_postcard_image_prompt(
     extra_texts: list[str],
     emblem_style: str,
     emblem_text: str,
+    composition_mode: str = "scene_preserving",
+    subject_focus: list[str] | None = None,
+    reference_image_count: int = 1,
 ) -> str:
-    """Compose the actual Seedream art-direction sheet from validated fields."""
-    prompt = _remove_postcard_copy_directives(prompt)
-    design_concept = _remove_postcard_copy_directives(design_concept)
-    photo_transformation = _remove_postcard_copy_directives(photo_transformation)
-    visual_device = _remove_postcard_copy_directives(visual_device)
-    typography = _remove_postcard_copy_directives(typography)
-    prompt = _without_emblem_directives(prompt) if emblem_style == "none" else prompt
-    visual_device = (
-        _without_emblem_directives(visual_device)
-        if emblem_style == "none"
-        else visual_device
-    )
-    placement = {
-        "top_left": "左上区域",
-        "top_right": "右上区域",
-        "bottom_left": "左下区域",
-        "bottom_right": "右下区域",
-    }.get(title_placement, "左下区域")
-    route = {
-        "editorial_full_bleed": "杂志式满版摄影",
-        "paper_portal": "纸张开窗与越界景深",
-        "split_echo": "局部切片与视觉回声",
-        "tactile_collage": "照片与触感拼贴",
-        "contact_sheet": "接触印样式序列与镜头节奏",
-        "contour_cutout": "沿主体轮廓挖空与穿插",
-        "map_grid": "地图网格、路径与坐标式空间秩序",
-        "color_field": "大色域、负空间与尺度对撞",
-    }.get(layout_style, "杂志式满版摄影")
-    medium = {
-        "editorial_photo": "当代编辑摄影",
-        "cinematic_photo": "电影摄影",
-        "risograph": "Riso 孔版印刷",
-        "screenprint": "丝网印刷",
-        "gouache": "不透明水粉与照片融合",
-        "linocut": "亚麻油毡版画",
-        "mixed_media": "摄影与手工混合媒介",
-        "graphic_flat": "平面图形与摄影重组",
-    }.get(visual_medium, "当代编辑摄影")
-    palette = {
-        "source_harmony": "保留原图综合色彩关系",
-        "source_accent": "从原图提取一种高记忆度强调色",
-        "duotone": "从原图归纳双色套印",
-        "complementary": "由原图主色推导克制互补色",
-        "monochrome_pop": "单色主体配一个原图强调色",
-        "sun_faded": "日晒褪色的旅行印刷品色调",
-    }.get(palette_strategy, "保留原图综合色彩关系")
+    """Pass one coherent creative brief, with exact copy supplied separately.
+
+    Layout/medium enums remain compatible metadata. Re-expanding them into a
+    second art direction contradicted the brief and amplified generic layouts.
+    """
+    del series_motif, type_style, layout_style, visual_medium, palette_strategy
+    del title_placement
+    brief = _remove_no_text_instructions(prompt)
+    if reference_image_count == 1:
+        brief = _localize_postcard_image_reference(brief)
+    if not brief.strip():
+        brief = "；".join(part.strip() for part in (
+            design_concept, photo_transformation, visual_device,
+        ) if part.strip())
+    # Older callers supplied typography only in a separate field. Retain that
+    # useful direction when the complete brief does not already discuss type.
+    if typography.strip() and not re.search(r"字|标题|排印|type|letter", brief, re.I):
+        brief += "\n" + _remove_no_text_instructions(typography)
+    # Replace only an exact quoted copy value. Never discard its surrounding
+    # placement, colour, avoidance or existing-signage instructions.
+    for index, copy in enumerate([title, *extra_texts]):
+        if copy.strip():
+            label = "主标题" if index == 0 else f"辅助文案{index}"
+            brief = re.sub(
+                r'[“「\"]\s*' + re.escape(copy.strip()) + r'\s*[”」\"]',
+                label, brief,
+            )
     format_label = _POSTCARD_FORMAT_RATIOS.get(canvas_format, "横版 3:2")
-    type_direction = (
-        f"{type_style.family}/{type_style.composition}/{type_style.treatment}/"
-        f"{type_style.scale}，旋转 {type_style.rotation_degrees} 度"
-    )
     text_instruction = _postcard_text_instruction(
-        title=title,
-        extra_texts=extra_texts,
-        emblem_style=emblem_style,
-        emblem_text=emblem_text,
-        placement=placement,
+        title=title, extra_texts=extra_texts,
+        emblem_style=emblem_style, emblem_text=emblem_text,
+        placement="上述构图选定的位置",
     )
     return (
         load_prompt("postcard_skill.md").strip()
-        + f"\n成图规格：{format_label}。空间构成：{route}。视觉媒介：{medium}。色彩：{palette}。"
-        + f"\n系列母题：{series_motif.strip()}。本张要延续母题，但不得复制同一版式。"
-        + f"\n核心构思：{design_concept.strip()}"
-        + f"\n照片变换：{photo_transformation.strip()}"
-        + f"\n视觉装置：{visual_device.strip()}"
-        + f"\n字体方向：{typography.strip()}；执行标记为 {type_direction}。"
-        + "图像模型直接绘制全部批准文字。可按原图采用花哨夸张、优雅克制或高对比冲击的字形，"
-          "让字形成为画面设计的一部分，所有笔画必须完整可辨。"
-        + f"\n执行简报：{prompt.strip()}"
-        + f"\n文字与徽记：{text_instruction}"
-        + f"\n输出 {format_label} 单张成图；Image 1 是唯一事实来源。"
+        + "\n" + _postcard_source_contract(composition_mode, subject_focus, reference_image_count)
+        + f"\n成品规格：{format_label}。\n{brief.strip()}"
+        + f"\n新增文案：{text_instruction}"
+    )
+
+
+def _postcard_source_contract(
+    composition_mode: str, subject_focus: list[str] | None, image_count: int,
+    *, first_image_number: int = 1,
+) -> str:
+    modes = {
+        "scene_preserving": "保留选定场景的关键关系；画法、色彩与质感按简报创作，允许整体绘画化。",
+        "subject_recompose": "保留主体及少量关键特征，位置、比例、背景、景别和留白按设计重构；其他细节可以取舍。",
+        "multi_photo_collage": "只组合有具体关联的选定元素，以主图的光色与气氛为中心；跨场景重组保持来历清楚，不拼出不存在的建筑或实体空间。",
+    }
+    focus = subject_focus or []
+    sources = "；".join(
+        f"图片{index + first_image_number}：{focus[index] if index < len(focus) else '原图素材'}"
+        for index in range(image_count)
+    )
+    return (
+        f"素材与主体：{sources}。构图方式：{modes.get(composition_mode, modes['scene_preserving'])}"
+        "原片保留原则：选中主体和关键特征仍可辨认，媒介与构图可充分创作，"
+        "不要求逐像素复制全部物件。"
     )
 
 
@@ -1418,23 +1429,33 @@ def _postcard_text_instruction(
         else "；不加入徽记"
     )
     return (
-        f"以{placement}为构图锚点，在成图中直接绘制并逐字准确呈现 {copy_text}"
+        f"以{placement}为构图锚点，在成图中直接绘制并逐字准确呈现 {copy_text}，每条批准文案只出现一次"
         f"{emblem_instruction}；不得增加列表之外的随机文字、固定品牌眉题、"
-        "第三方商标、日期或水印"
+        "第三方商标、未经批准的日期或水印；选中主体上的真实题字保持准确，其余招牌可随裁切省略"
     )
 
 
 def review_postcard_artwork(
     *,
-    original_data_url: str,
+    original_data_url: str | None = None,
+    original_data_urls: list[str] | None = None,
     candidate_data_url: str,
     item: PostcardPlanItem,
+    requirements: str = "",
 ) -> PostcardCritiqueResult:
     """Run the single bounded aesthetic review on a finished preview."""
     system_prompt = load_prompt("postcard_critic_system.md")
+    originals = original_data_urls or ([original_data_url] if original_data_url else [])
+    if not originals:
+        raise AIGenerationError("明信片评审缺少原始素材")
     plan_summary = {
+        "user_requirements": requirements,
+        "composition_mode": item.composition_mode,
+        "subject_focus": item.subject_focus,
         "series_motif": item.series_motif,
         "design_concept": item.design_concept,
+        "image_prompt": item.image_prompt,
+        "photo_transformation": item.photo_transformation,
         "canvas_format": item.canvas_format,
         "layout_style": item.layout_style,
         "visual_medium": item.visual_medium,
@@ -1449,8 +1470,9 @@ def review_postcard_artwork(
         ),
     }
     user_text = (
-        "请评审图片2是否忠实、好看、完成度高，并严格对照以下已批准创意计划。"
-        "图片1仅用于核对原始人物、地貌、建筑与地点事实。\n"
+        f"前 {len(originals)} 张是按素材顺序排列的原图，最后一张图片{len(originals) + 1}是候选明信片。"
+        "按用户需求、subject_focus 与 composition_mode 核对主体身份和设计效果。"
+        "检查多图关联与关键特征，允许整体艺术化；独立判断简报和成图的设计质量。\n"
         + json.dumps(plan_summary, ensure_ascii=False, separators=(",", ":"))
     )
     with timed_stage("postcard_aesthetic_review", canvas_format=item.canvas_format):
@@ -1458,7 +1480,7 @@ def review_postcard_artwork(
             task=ark_chat_client.TASK_POSTCARD_CRITIC,
             system_prompt=system_prompt,
             user_text=user_text,
-            image_data_urls=[original_data_url, candidate_data_url],
+            image_data_urls=[*originals, candidate_data_url],
             temperature=0,
             # Agent Plan keeps reasoning enabled for vision tasks. A small
             # budget can be consumed entirely before the strict JSON answer.
@@ -1537,9 +1559,11 @@ def postcard_review_is_acceptable(result: Any) -> bool:
     if postcard_review_is_blocking(result):
         return False
     return (
-        _postcard_critique_score(result, "fidelity_score") >= 6
-        and _postcard_critique_score(result, "composition_score") >= 5
-        and _postcard_critique_score(result, "typography_score") >= 5
+        bool(getattr(result, "approved", True))
+        and _postcard_critique_score(result, "fidelity_score") >= 6
+        and _postcard_critique_score(result, "artistry_score") >= 6
+        and _postcard_critique_score(result, "composition_score") >= 6
+        and _postcard_critique_score(result, "typography_score") >= 6
         and _postcard_critique_score(result, "finish_score") >= 5
         and _postcard_critique_score(result, "template_risk_score") <= 6
         and postcard_review_quality_score(result) >= 6.4
@@ -1548,68 +1572,98 @@ def postcard_review_is_acceptable(result: Any) -> bool:
 
 def repair_postcard_artwork(
     *,
-    original_data_url: str,
+    original_data_url: str | None = None,
+    original_data_urls: list[str] | None = None,
     candidate_base_data_url: str,
     item: PostcardPlanItem,
     critique: PostcardCritiqueResult,
 ) -> ImageGenerationResult:
-    """Apply at most one targeted image-layer repair after visual review."""
-    placement = {
-        "top_left": "左上区域",
-        "top_right": "右上区域",
-        "bottom_left": "左下区域",
-        "bottom_right": "右下区域",
-    }.get(item.title_placement, "构图选定区域")
+    """Repair once with all selected originals and unambiguous image roles."""
+    originals = original_data_urls or ([original_data_url] if original_data_url else [])
+    if not originals:
+        raise AIGenerationError("明信片返修缺少原始素材")
+    # Review: originals first, candidate last. Repair: candidate first, originals
+    # next. Remap both the design and any critic references before reusing them.
+    mapping = {index: index + 1 for index in range(1, len(originals) + 1)}
+    instruction_mapping = {**mapping, len(originals) + 1: 1}
+    repair_instruction = _remap_postcard_picture_numbers(
+        critique.repair_instruction.strip() or "修复评审指出的主要完成度问题",
+        instruction_mapping,
+    )
+    brief = _remap_postcard_picture_numbers(item.image_prompt, mapping)
+    keep_elements = [
+        _remap_postcard_picture_numbers(part, instruction_mapping)
+        for part in (getattr(critique, "keep_elements", None) or [])
+    ]
+    source_contract = _postcard_source_contract(
+        item.composition_mode, item.subject_focus, len(originals), first_image_number=2,
+    )
     text_instruction = _postcard_text_instruction(
-        title=item.title,
-        extra_texts=item.extra_texts,
-        emblem_style=item.emblem_style,
-        emblem_text=item.emblem_text,
-        placement=placement,
+        title=item.title, extra_texts=item.extra_texts,
+        emblem_style=item.emblem_style, emblem_text=item.emblem_text,
+        placement="现有文字位置（除非返修明确要求调整）",
     )
-    repair_instruction = critique.repair_instruction.strip() or "修复评审指出的主要完成度问题"
-    repair_visual_device = (
-        _without_emblem_directives(item.visual_device)
-        if item.emblem_style == "none"
-        else item.visual_device
-    )
-    route = {
-        "editorial_full_bleed": "杂志式满版摄影",
-        "paper_portal": "纸张开窗与越界景深",
-        "split_echo": "局部切片与视觉回声",
-        "tactile_collage": "照片与触感拼贴",
-        "contact_sheet": "接触印样式序列",
-        "contour_cutout": "主体轮廓挖空与穿插",
-        "map_grid": "地图网格与路径秩序",
-        "color_field": "大色域与负空间对撞",
-    }.get(item.layout_style, item.layout_style)
     prompt = (
         load_prompt("postcard_skill.md").strip()
-        + "\n图片1是当前艺术底图，图片2是原始事实参考。只做一次局部返修，"
-        "保留现有画幅、主体身份、主要构图、系列母题和已经成立的设计，不得重做成另一张图。"
-        + f"\n评审返修要求：{repair_instruction}。"
-        + f"\n评审前分数：保真 {critique.fidelity_score}/10，艺术性 {critique.artistry_score}/10，"
-        f"构图 {critique.composition_score}/10，模板风险 {critique.template_risk_score}/10。"
-        "返修必须提高弱项，但不能用普通直出照片替换已经成立的艺术设计。"
-        + f"\n系列母题：{item.series_motif}。画幅：{_POSTCARD_FORMAT_RATIOS[item.canvas_format]}；"
-        f"空间机制：{route}；媒介：{item.visual_medium}；色彩策略：{item.palette_strategy}。"
-        + f"\n必须保留的照片变换：{item.photo_transformation}。"
-        + f"\n必须保留的视觉装置：{repair_visual_device}。"
-        + f"\n文字与徽记：{text_instruction}。"
-        "不得新增人物、地点、事件、随机文字、固定产品眉题、第三方商标或水印。"
+        + "\n图片1是当前成稿，其余图片依次为原始素材。保留已经成立的设计，仅修正下述问题。"
+        + f"\n{source_contract}\n本张设计：{brief}"
+        + "\n本次必须保留的设计：" + json.dumps(keep_elements, ensure_ascii=False)
+        + f"\n本次返修：{repair_instruction}"
+        + f"\n画幅：{_POSTCARD_FORMAT_RATIOS[item.canvas_format]}。新增文案：{text_instruction}"
     )
     log_event(
-        "postcard_aesthetic_repair",
-        status="ready",
-        canvas_format=item.canvas_format,
-        repair_target=critique.repair_target,
-        instruction_chars=len(repair_instruction),
+        "postcard_aesthetic_repair", status="ready", canvas_format=item.canvas_format,
+        repair_target=critique.repair_target, instruction_chars=len(repair_instruction),
+        reference_image_count=len(originals),
         prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
     )
     return ark_image_client.generate_image(
-        prompt=prompt,
-        image_data_urls=[candidate_base_data_url, original_data_url],
+        prompt=prompt, image_data_urls=[candidate_base_data_url, *originals],
         size=_POSTCARD_IMAGE_SIZES.get(item.canvas_format, settings.ARK_IMAGE_SIZE),
+    )
+
+
+def compare_postcard_revision(
+    *, original_data_urls: list[str], initial_data_url: str, revised_data_url: str,
+    item: PostcardPlanItem, critique: PostcardCritiqueResult, requirements: str = "",
+) -> PostcardRevisionDecision:
+    """Compare once after repair; never start another image-generation loop."""
+    if not original_data_urls:
+        raise AIGenerationError("明信片前后对比缺少原始素材")
+    count = len(original_data_urls)
+    context = {
+        "user_requirements": requirements,
+        "design": item.model_dump(),
+        "initial_blocking": postcard_review_is_blocking(critique),
+        "issues": critique.issues,
+        "keep_elements": critique.keep_elements,
+        "repair_instruction": critique.repair_instruction,
+    }
+    user_text = (
+        f"图片1至图片{count}是原片；图片{count + 1}是初稿；图片{count + 2}是一次返修稿。"
+        "初次评审中的候选图编号指向初稿。比较两张完整作品，只返回保留选择。\n"
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+    with timed_stage("postcard_revision_comparison", source_count=count):
+        raw = ark_chat_client.chat_json(
+            task=ark_chat_client.TASK_POSTCARD_CRITIC,
+            system_prompt=load_prompt("postcard_revision_system.md"), user_text=user_text,
+            image_data_urls=[*original_data_urls, initial_data_url, revised_data_url],
+            temperature=0, max_completion_tokens=4000,
+        )
+    result = output_parser.parse_model_json(raw, PostcardRevisionDecision)
+    # A later model choice cannot reinstate a known objective defect.
+    if result.choice == "keep_original" and postcard_review_is_blocking(critique):
+        result.choice = "neither"
+    log_event("postcard_revision_choice", status="decided", choice=result.choice, reason=result.reason)
+    return result
+
+
+def _remap_postcard_picture_numbers(value: str, mapping: dict[int, int]) -> str:
+    return re.sub(
+        r"(?:图片|图像|Image)\s*(\d+)",
+        lambda match: f"图片{mapping.get(int(match.group(1)), int(match.group(1)))}",
+        value, flags=re.IGNORECASE,
     )
 
 
@@ -3108,6 +3162,8 @@ def _register_planning_facts(
     registry: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Attach request-unique IDs to every independently selectable fact."""
+    from app.ai.transport_facts import normalize_transport_fact
+
     enriched = deepcopy(result)
     list_keys = [
         key for key in ("pois", "days", "candidates") if isinstance(enriched.get(key), list)
@@ -3126,6 +3182,7 @@ def _register_planning_facts(
         for item in enriched[key]:
             if not isinstance(item, dict):
                 continue
+            item.update(normalize_transport_fact(item, tool_name))
             fact_id = _new_fact_id(tool_name)
             item["fact_id"] = fact_id
             registry[fact_id] = {
@@ -3138,6 +3195,7 @@ def _register_planning_facts(
             registered = True
     recommended = enriched.get("recommended")
     if isinstance(recommended, dict):
+        recommended.update(normalize_transport_fact(recommended, tool_name))
         fact_id = _new_fact_id(tool_name)
         recommended["fact_id"] = fact_id
         registry[fact_id] = {
@@ -3149,6 +3207,7 @@ def _register_planning_facts(
         }
         registered = True
     if not registered:
+        enriched.update(normalize_transport_fact(enriched, tool_name))
         fact_id = _new_fact_id(tool_name)
         enriched["fact_id"] = fact_id
         registry[fact_id] = {
@@ -3261,71 +3320,11 @@ def _normalize_clock(value: str | None) -> str | None:
 
 
 def _time_window_problems(
-    data: ItineraryData, user_text: str
+    data: ItineraryData, user_text: str, retained_facts: dict[str, dict[str, Any]] | None = None,
 ) -> list[planning_feasibility.Problem]:
-    """Check explicit Chinese departure windows against the generated timeline.
+    from app.ai.planning_windows import time_window_problems
 
-    Findings are day-scoped (``date`` set, no ``schedule_id``): the missing leg is
-    about that day's shape, not a single bad row, so annotate_unresolved can put a
-    day advisory on any trip that states 「X日晚上回Y」— not only the e2e fixture.
-    """
-    try:
-        year = int(data.trip_info.start_date[:4])
-    except (TypeError, ValueError):
-        return []
-    days = {day.date: day for day in data.itinerary}
-    problems: list[planning_feasibility.Problem] = []
-    seen: set[tuple[str, str, str]] = set()
-    for match in _TIME_WINDOW_PATTERN.finditer(user_text):
-        destination_match = _DESTINATION_PATTERN.search(match.group("clause"))
-        if not destination_match:
-            continue
-        date = f"{year:04d}-{int(match.group('month')):02d}-{int(match.group('day')):02d}"
-        period = match.group("period")
-        destination = destination_match.group("destination")
-        anchor = (date, period, destination)
-        if anchor in seen:
-            continue
-        seen.add(anchor)
-        earliest, latest = _TIME_WINDOW_BOUNDS[period]
-        day = days.get(date)
-        matched = False
-        if day:
-            for schedule in day.schedules:
-                text = " ".join(
-                    part
-                    for part in (
-                        schedule.activity,
-                        schedule.transport,
-                        schedule.place_name,
-                    )
-                    if part
-                )
-                if destination not in text and not any(
-                    marker in text for marker in _INTERCITY_MARKERS
-                ):
-                    continue
-                candidate_times = [schedule.start_time or ""]
-                candidate_times.extend(_CLOCK_PATTERN.findall(text))
-                normalized_times = [
-                    normalized
-                    for value in candidate_times
-                    if (normalized := _normalize_clock(value)) is not None
-                ]
-                if any(earliest <= value <= latest for value in normalized_times):
-                    matched = True
-                    break
-        if not matched:
-            problems.append(
-                planning_feasibility.Problem(
-                    message=(
-                        f"{date} {period}前往{destination}缺少 "
-                        f"{earliest}–{latest} 内的独立跨城交通日程"
-                    ),
-                    date=date,
-                )
-            )
-    return problems
+    return time_window_problems(data, user_text, retained_facts)
 
 
 def _schedule_overlap_problems(
@@ -3396,6 +3395,8 @@ def _itinerary_problems(
     neighbour is as unusable as one citing a flight that does not exist, so both
     block; only the day-density rules are advisory.
     """
+    from app.ai import planning_access
+
     fact_problems = planning_feasibility.find_problem_details(
         itinerary, retained_facts
     )
@@ -3405,7 +3406,7 @@ def _itinerary_problems(
         if problem.resolution == "defer" and problem.date
     }
     problems: list[planning_feasibility.Problem] = []
-    for problem in _time_window_problems(itinerary, user_text):
+    for problem in _time_window_problems(itinerary, user_text, retained_facts):
         if problem.date in deferred_dates:
             problem = planning_feasibility.Problem(
                 message=problem.message,
@@ -3417,6 +3418,10 @@ def _itinerary_problems(
         problems.append(problem)
     problems.extend(_schedule_overlap_problems(itinerary))
     problems.extend(planning_feasibility.lodging_consistency_problems(itinerary))
+    problems.extend(planning_feasibility.repeated_attraction_problems(itinerary, retained_facts, user_text))
+    problems.extend(planning_access.opening_hours_problems(itinerary, retained_facts))
+    problems.extend(planning_access.restricted_route_problems(itinerary, retained_facts, user_text))
+    problems.extend(planning_access.airport_wait_problems(itinerary, retained_facts, user_text))
     problems.extend(fact_problems)
     seen: set[str] = set()
     unique: list[planning_feasibility.Problem] = []
@@ -3499,6 +3504,7 @@ def _repair_itinerary_violations(
         )
         if repaired is None:
             break
+        repaired, _ = planning_feasibility.autofix(repaired, retained_facts)
         repaired, _ = planning_feasibility.defer_unanchored_intercity_times(
             repaired, retained_facts
         )
@@ -3531,7 +3537,7 @@ def _repair_itinerary_violations(
     blocking = [
         problem
         for problem in unresolved
-        if problem.blocking and problem.resolution != "advisory"
+        if problem.blocking and problem.resolution == "model_repair"
     ]
     if not unresolved:
         return current

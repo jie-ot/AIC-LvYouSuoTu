@@ -2,7 +2,8 @@
 
 Validate → read memory → multi-turn requirement intake → explicit user
 confirmation → controlled fact research → full ItineraryData → deterministic
-alignment and validation. Planning never updates the user's preference profile.
+alignment and validation. Only explicit durable user statements can update
+memory; generated itineraries are not treated as preference evidence.
 Failures: 1002 (param), 1001 (model/JSON/validation), 1003 (config).
 """
 
@@ -86,6 +87,11 @@ def plan(user_id: str, request: PlanningRequest) -> PlanningResponse:
     with timed_stage("planning_read_memory"):
         with session_scope() as session:
             memory = memory_service.get_or_create_current_memory(session, user_id)
+            memory = memory_service.remember_user_requirements(
+                session, memory,
+                [message.content for message in request.messages if message.role == "user"]
+                + [request.message],
+            )
             memory_json = getattr(memory, "memory_json", None)
             selected_memory = planning_memory_service.select_memory(
                 memory_json,

@@ -44,7 +44,7 @@ export function classifySchedule(schedule: Schedule): ScheduleKind {
   if (hasTag(tags, DINING_TAGS)) return "dining"
   if (hasTag(tags, SHOPPING_TAGS)) return "shopping"
   if (TRANSPORT_HUB.test(text)) return "transport"
-  if (HOTEL_NAME.test(text) && HOTEL_ACTION.test(text)) return "hotel"
+  if (HOTEL_NAME.test(text) && HOTEL_ACTION.test(text) && (!schedule.place_name || HOTEL_NAME.test(schedule.place_name))) return "hotel"
   if (DINING_NAME.test(text)) return "dining"
   if (SHOPPING_NAME.test(text)) return "shopping"
   return "other"

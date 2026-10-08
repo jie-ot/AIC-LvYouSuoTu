@@ -1,6 +1,7 @@
 "use client"
 
 import { AlertCircle, CheckCircle2, Info } from "lucide-react"
+import { createPortal } from "react-dom"
 import { useApp } from "@/components/shared/app-context"
 import { cn } from "@/lib/utils"
 
@@ -20,7 +21,8 @@ const STYLES = {
 export function ToastHost() {
   const { toasts } = useApp()
 
-  return (
+  if (!toasts.length || typeof document === "undefined") return null
+  return createPortal(
     <div className="pointer-events-none fixed inset-x-0 top-[max(1rem,env(safe-area-inset-top))] z-[60] flex flex-col items-center gap-2 px-4">
       {toasts.map((t) => {
         const Icon = ICONS[t.variant]
@@ -35,6 +37,7 @@ export function ToastHost() {
           </div>
         )
       })}
-    </div>
+    </div>,
+    document.querySelector("dialog[open]") ?? document.body,
   )
 }

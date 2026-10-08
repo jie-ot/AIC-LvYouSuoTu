@@ -115,6 +115,10 @@ class PostcardTypeStyle(BaseModel):
 
 
 class PostcardPlanItem(BaseModel):
+    composition_mode: Literal[
+        "scene_preserving", "subject_recompose", "multi_photo_collage",
+    ] = "scene_preserving"
+    subject_focus: list[str] = Field(default_factory=list)
     series_motif: str
     design_concept: str
     photo_transformation: str
@@ -131,6 +135,7 @@ class PostcardPlanItem(BaseModel):
     ] = "landscape_3_2"
     layout_style: Literal[
         "editorial_full_bleed",
+        "paper_margin",
         "paper_portal",
         "split_echo",
         "tactile_collage",
@@ -142,6 +147,7 @@ class PostcardPlanItem(BaseModel):
     visual_medium: Literal[
         "editorial_photo",
         "cinematic_photo",
+        "watercolor",
         "risograph",
         "screenprint",
         "gouache",
@@ -158,7 +164,8 @@ class PostcardPlanItem(BaseModel):
         "sun_faded",
     ] = "source_harmony"
     title_placement: Literal[
-        "top_left", "top_right", "bottom_left", "bottom_right"
+        "top_left", "top_right", "bottom_left", "bottom_right",
+        "top_center", "bottom_center", "center", "in_scene",
     ] = "bottom_left"
     text_rendering: Literal["model_integrated"] = "model_integrated"
     title: str
@@ -197,6 +204,7 @@ class PostcardCritiqueResult(BaseModel):
         "unsafe_content",
     ]] = Field(default_factory=list, max_length=5)
     issues: list[str] = Field(default_factory=list, max_length=5)
+    keep_elements: list[str] = Field(default_factory=list, max_length=4)
     repair_target: Literal["none", "image", "typography", "both"] = "none"
     repair_instruction: str = Field(default="", max_length=300)
     typography_adjustment: Literal[
@@ -206,6 +214,13 @@ class PostcardCritiqueResult(BaseModel):
         "move_opposite_corner",
         "simplify_treatment",
     ] = "none"
+
+
+class PostcardRevisionDecision(BaseModel):
+    """One final choice between the initial and single repaired artwork."""
+
+    choice: Literal["use_revision", "keep_original", "neither"]
+    reason: str = Field(min_length=1, max_length=300)
 
 
 class ReportStatNote(BaseModel):

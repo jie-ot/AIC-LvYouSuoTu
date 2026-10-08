@@ -1,7 +1,7 @@
 """Build explainable travel history and cross-trip observations.
 
-Facts stay attached to trips. Repeated behaviour becomes an observation, never
-an active planning preference until the user explicitly confirms it.
+Facts stay attached to trips. Automatic consolidation uses photo observations;
+legacy explicit confirmations remain editable for compatibility.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from app.services import trip_service
 
 
 TRAVEL_TYPE_LABELS = {
-    "coast": "海滨海岛",
+    "coast": "湖海水岸",
     "nature": "山水自然",
     "culture": "历史人文",
     "city": "城市漫游",
@@ -31,7 +31,7 @@ TRAVEL_TYPE_LABELS = {
 }
 
 TRAVEL_TYPE_EVIDENCE = {
-    "coast": "海岸、海岛或港湾",
+    "coast": "湖泊、河流或海岸水景",
     "nature": "山地、公园或自然景观",
     "culture": "博物馆、历史建筑或老城街区",
     "city": "城市地标、街区或夜景",
@@ -39,7 +39,7 @@ TRAVEL_TYPE_EVIDENCE = {
 }
 
 TRAVEL_TYPE_PLANNING_TEXT = {
-    "coast": "规划时优先考虑海岸、海岛或港湾类地点",
+    "coast": "规划时优先考虑湖泊、河流或海岸水景类地点",
     "nature": "规划时优先考虑山地、公园或自然景观",
     "culture": "规划时优先考虑博物馆、历史建筑或老城街区",
     "city": "规划时优先考虑城市地标、街区或夜景",
@@ -59,6 +59,7 @@ SCENE_TO_TYPE = {
 
 TYPE_KEYWORDS = {
     "coast": (
+        "湖泊", "河流", "湖边", "河岸", "水岸", "水景",
         "海滨", "海岸", "海岛", "沙滩", "港湾", "渔港", "滨海", "海景",
         "三亚", "大连", "青岛", "厦门", "海口", "舟山", "北海", "泉州石狮",
     ),

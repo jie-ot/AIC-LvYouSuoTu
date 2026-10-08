@@ -1,0 +1,39 @@
+/* Keep the original application layout; only shared interaction affordances. */
+.skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; transform: translateY(-200%); padding: 12px 18px; border-radius: 8px; background: var(--paper-raised); color: var(--ink); }
+.skip-link:focus { transform: none; }
+:where(a, button, input, select, textarea, summary):focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.app-dialog { position: fixed; inset: 0; margin: auto; padding: 0; max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); border: 0; background: transparent; color: var(--ink); overflow-y: auto; }
+.app-dialog::backdrop { background: #25272370; backdrop-filter: blur(3px); }
+.confirm-modal { width: 320px; border-radius: 16px; }
+.action-modal { width: 480px; border-radius: 20px; }
+.action-modal .action-sheet { width: 100%; margin: 0; }
+.create-page .upload-zone { background: #fff; border-color: #d1d1d6; color: #1d1d1f; }
+.create-page .upload-photo-mark { color: var(--primary); }
+.create-page .upload-zone > strong { color: #1d1d1f; font-weight: 600; }
+.create-page .output-options > button[aria-pressed="true"] { background: #007aff0d; border-color: #007aff66; }
+.create-page .create-prompt textarea { font-family: var(--font-sans); }
+.task-progress { width: min(100%, 520px); margin: 0 auto; padding: 22px 24px; border: 1px solid rgba(60,60,67,.09); border-radius: 16px; background: var(--paper-raised, white); color: var(--ink); font-family: var(--font-sans); }
+.task-progress-heading { display: flex; align-items: center; gap: 10px; }
+.task-progress-heading > svg { flex-shrink: 0; color: var(--primary); animation: task-spin 1.1s linear infinite; }
+.task-progress-heading h2 { margin: 0; font: 600 15px/1.5 var(--font-sans); letter-spacing: 0; }
+.task-progress-detail { margin: 8px 0 0 27px; color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+.task-progress-time { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; margin-top: 18px; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.task-progress time { font-variant-numeric: tabular-nums; color: var(--ink); margin-left: 4px; }
+.task-progress progress { display: block; width: 100%; height: 3px; margin-top: 14px; border: none; border-radius: 4px; accent-color: var(--primary); }
+.task-progress progress::-webkit-progress-bar { background: #e8e8ed; border-radius: 4px; }
+.task-progress progress::-webkit-progress-value { background: var(--primary); border-radius: 4px; }
+.task-progress-connection { margin: 12px 0 0; font-size: 12px; color: var(--ink-soft); }
+.create-footer > .task-progress { width: min(100%, 760px); padding: 8px 2px 4px; border: 0; border-radius: 0; background: transparent; }
+.create-footer > .task-progress .task-progress-time { margin-top: 10px; }
+@keyframes task-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .task-progress-heading > svg { animation: none; } }
+@media (max-width: 359px) {
+  .discovery-tabs { gap: 16px; }
+  .discovery-heading { gap: 8px; }
+  .discovery-primary { padding-inline: 10px; }
+  .planning-context-strip { flex-wrap: wrap; }
+}
+.itinerary-memory-heading { cursor: pointer; list-style: none; }
+.itinerary-memory-heading::-webkit-details-marker { display: none; }
+.itinerary-memory-heading::after { content: "+"; margin-left: auto; color: var(--muted-foreground); }
+.itinerary-memory-evidence[open] > .itinerary-memory-heading::after { content: "−"; }

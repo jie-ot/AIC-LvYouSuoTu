@@ -30,6 +30,7 @@ from app.ai.schemas import (
     ReportDraftResult,
 )
 from app.core.business_logging import call_in_current_context, log_event, timed_stage
+from app.core import generation_progress
 from app.core.config import settings
 from app.core.exceptions import AIGenerationError, BusinessError, InternalError, InvalidParamError
 from app.db.session import session_scope
@@ -563,6 +564,7 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             # The same authenticated request can replay just analysis → proposal
             # → merge while preserving the already-saved postcard/report.
             pending = {"stage": "proposal"}
+        generation_progress.set_phase("saving")
         result = _persist_results(
             user_id=user_id, operation_id=operation_id, options=options,
             requested_trip_id=request.trip_id,
@@ -613,7 +615,7 @@ def _generate_postcards(
             f"符合质量与场景要求的照片仅有 {len(selection.items)} 张，明信片数量已自动减少",
             "postcard",
         ))
-    selected_ids = [item.source_asset_ids[0] for item in selection.items]
+    selected_ids = _postcard_creative_asset_ids(analysis, selection, requirements)
     try:
         # Agent Plan currently rejects overlapping calls from one local task.
         # Keep only the copy/planning request serialized; image rendering remains parallel.
@@ -623,7 +625,7 @@ def _generate_postcards(
                 image_data_urls=[data_url_by_asset[asset_id] for asset_id in selected_ids],
                 requirements=requirements, memory_summary="",
             )
-        plan_items = _enforce_postcard_plan(plan, selection)
+        plan_items = _enforce_postcard_plan(plan, selection, set(selected_ids))
     except orchestrator.PartialPostcardCreativePlanError as exc:
         fallback_items = _fallback_postcard_plan(analysis, selection)
         series_motif = next(
@@ -634,7 +636,9 @@ def _generate_postcards(
         for index, (candidate, selected, fallback_item) in enumerate(
             zip(exc.candidates, selection.items, fallback_items, strict=True)
         ):
-            if candidate is not None and candidate.source_asset_ids == selected.source_asset_ids:
+            if candidate is not None and not orchestrator._postcard_plan_item_errors(
+                candidate, selected.source_asset_ids, set(selected_ids),
+            ):
                 plan_items.append(candidate)
                 continue
             plan_items.append(fallback_item.model_copy(update={"series_motif": series_motif}))
@@ -643,7 +647,9 @@ def _generate_postcards(
                 "该张创意方案未通过校验，已单独使用原图对应的本地艺术指导",
                 "postcard", item_index=index, retryable=True,
             ))
-        plan_items = _enforce_postcard_plan(PostcardPlanResult(items=plan_items), selection)
+        plan_items = _enforce_postcard_plan(
+            PostcardPlanResult(items=plan_items), selection, set(selected_ids),
+        )
         logger.warning("postcard creative partial fallback: %d item(s)", sum(
             item is None for item in exc.candidates
         ))
@@ -659,7 +665,8 @@ def _generate_postcards(
         futures = [
             executor.submit(call_in_current_context(
                 _render_and_store_postcard, user_id=user_id, index=index, item=item,
-                source_data_url=data_url_by_asset[item.source_asset_ids[0]],
+                requirements=requirements,
+                source_data_urls=[data_url_by_asset[asset_id] for asset_id in item.source_asset_ids],
                 generated_temp_asset_ids=generated_temp_asset_ids,
                 warnings=warnings, warnings_lock=warnings_lock,
             ))
@@ -684,13 +691,27 @@ def _generate_postcards(
         return sorted(renders, key=lambda item: item.sort_order)
 
 
+def _postcard_creative_asset_ids(
+    analysis: PhotoAnalysisResult, selection: PostcardSelectionResult, requirements: str,
+) -> list[str]:
+    """Offer a bounded, scene-filtered pool; the designer chooses actual inputs."""
+    anchors = [item.source_asset_ids[0] for item in selection.items]
+    candidates, _ = _deterministic_selection(analysis, 8, requirements)
+    return list(dict.fromkeys([
+        *anchors, *(item.source_asset_ids[0] for item in candidates.items),
+    ]))[:8]
+
+
 def _enforce_postcard_plan(
     plan: PostcardPlanResult, selection: PostcardSelectionResult,
+    available_asset_ids: set[str] | None = None,
 ) -> list[PostcardPlanItem]:
     if len(plan.items) != len(selection.items):
         raise AIGenerationError("明信片创意数量不一致")
     for item, selected in zip(plan.items, selection.items, strict=True):
-        if item.source_asset_ids != selected.source_asset_ids or not 2 <= len(item.title.strip()) <= 10:
+        if orchestrator._postcard_plan_item_errors(
+            item, selected.source_asset_ids, available_asset_ids,
+        ) or not 2 <= len(item.title.strip()) <= 10:
             raise AIGenerationError("明信片创意未严格对应后端选图")
     return list(plan.items)
 
@@ -782,16 +803,22 @@ def _fallback_title(
 
 
 def _render_and_store_postcard(
-    *, user_id: str, index: int, item: PostcardPlanItem, source_data_url: str,
+    *, user_id: str, index: int, item: PostcardPlanItem, source_data_urls: list[str],
     generated_temp_asset_ids: list[str], warnings: list[dto.GenerationWarning],
     warnings_lock: Lock,
+    requirements: str = "",
 ) -> PostcardRender:
+    if not source_data_urls or len(source_data_urls) != len(item.source_asset_ids):
+        raise InternalError("明信片原始素材不完整")
+    source_data_url = source_data_urls[0]
     fallback = False
     relative_path = storage_service.build_postcard_relative_path("jpg")
     approved_preview: postcard_renderer.ComposedPostcard | None = None
     try:
+        generation_progress.card_step(index, "drawing")
         image_result = orchestrator.render_postcard_image(
-            prompt=item.image_prompt, image_data_urls=[source_data_url],
+            prompt=item.image_prompt, image_data_urls=source_data_urls,
+            composition_mode=item.composition_mode, subject_focus=item.subject_focus,
             design_concept=item.design_concept, photo_transformation=item.photo_transformation,
             visual_device=item.visual_device, typography=item.typography,
             series_motif=item.series_motif,
@@ -817,6 +844,7 @@ def _render_and_store_postcard(
             ))
         logger.warning("postcard item fallback index=%d reason=%s", index, type(exc).__name__)
     if not fallback:
+        generation_progress.card_step(index, "reviewing")
         critique = None
         preview = None
         try:
@@ -824,13 +852,15 @@ def _render_and_store_postcard(
             approved_preview = preview
             with _CREATIVE_MODEL_LOCK:
                 critique = orchestrator.review_postcard_artwork(
-                    original_data_url=source_data_url,
+                    original_data_urls=source_data_urls,
                     candidate_data_url=_jpeg_data_url(preview.content),
                     item=item,
+                    requirements=requirements,
                 )
             if not orchestrator.postcard_review_is_acceptable(critique):
+                generation_progress.card_step(index, "repairing")
                 repair_result = orchestrator.repair_postcard_artwork(
-                    original_data_url=source_data_url,
+                    original_data_urls=source_data_urls,
                     candidate_base_data_url=_jpeg_data_url(source),
                     item=item,
                     critique=critique,
@@ -842,14 +872,33 @@ def _render_and_store_postcard(
                 )
                 with open(repaired.abs_path, "rb") as file:
                     repaired_source = file.read()
-                # The one repaired image is the final deliverable. Do not
-                # invoke another critic or schedule another repair.
-                approved_preview = _compose_planned_postcard(
+                revision_preview = _compose_planned_postcard(
                     repaired_source, item, fallback=False,
                 )
+                generation_progress.card_step(index, "comparing")
+                with _CREATIVE_MODEL_LOCK:
+                    decision = orchestrator.compare_postcard_revision(
+                        original_data_urls=source_data_urls,
+                        initial_data_url=_jpeg_data_url(preview.content),
+                        revised_data_url=_jpeg_data_url(revision_preview.content),
+                        item=item, critique=critique, requirements=requirements,
+                    )
+                if decision.choice == "use_revision":
+                    approved_preview = revision_preview
+                elif decision.choice == "neither" or orchestrator.postcard_review_is_blocking(critique):
+                    fallback = True
+                    approved_preview = None
+                    with warnings_lock:
+                        warnings.append(_warning(
+                            "POSTCARD_BLOCKING_DEFECT_LOCAL_FALLBACK",
+                            "本张初稿和返修仍有明显问题，已保留原图预览，请重试",
+                            "postcard", item_index=index, retryable=True,
+                        ))
+                # keep_original preserves the initial preview. No further
+                # image calls are allowed after this bounded comparison.
                 log_event(
                     "postcard_aesthetic_repair",
-                    status="applied",
+                    status=decision.choice,
                     item_index=index,
                     repair_target=critique.repair_target,
                 )
@@ -900,9 +949,11 @@ def _render_and_store_postcard(
         raise
     with warnings_lock:
         generated_temp_asset_ids.append(asset_id)
+    generation_progress.card_ready(index)
     return PostcardRender(
         title=item.title, relative_path=stored.relative_path, sort_order=index,
-        asset_id=asset_id, source_asset_ids=list(item.source_asset_ids),
+        asset_id=asset_id,
+        source_asset_ids=list(item.source_asset_ids[:1] if fallback else item.source_asset_ids),
         render_mode=composed.render_mode,
     )
 
@@ -924,6 +975,7 @@ def _jpeg_data_url(content: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")
 
 
+@generation_progress.report_branch
 def _draft_report_v5(
     *, analysis: PhotoAnalysisResult, requirements: str,
     uploaded_photos: list[dto.UploadedPhoto],
@@ -1089,6 +1141,8 @@ def _persist_results(
                     analysis=analysis,
                     photos=list(uploaded_photos or []),
                 )
+                if memory_status == "skipped":
+                    memory_status = "success"
         except Exception:  # noqa: BLE001
             # The works are already saved. A missing observation must not turn a
             # successful report or postcard into a failed generation request.
@@ -1096,6 +1150,10 @@ def _persist_results(
                 "failed to store photo observation",
                 extra={"operation_id": operation_id, "trip_id": trip_id},
             )
+            memory_status = "failed"
+            warnings.append(_warning(
+                "PHOTO_MEMORY_WRITE_FAILED", "作品已保存，但旅行记忆未能更新", "memory",
+            ))
 
     overall_status = "completed" if all(status != "failed" for status in (postcard_status, report_status, memory_status)) else "partial"
     result = dto.GenerateResult(

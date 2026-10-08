@@ -17,7 +17,8 @@ from app.models.base import utcnow
 from app.models.user_memory import UserMemory
 from app.models.user_memory_event import UserMemoryEvent
 from app.models.trip import Trip
-from app.services import id_service
+from app.models.file_asset import FileAsset
+from app.services import id_service, memory_consolidation
 
 INITIAL_MEMORY_TEXT = "暂无旅行记忆。"
 VALID_SOURCE_TYPES = {"generate", "manual", "explicit_requirement"}
@@ -71,6 +72,54 @@ REQUIREMENT_MARKERS = (
     "要", "不要", "只", "必须", "需要", "优先", "避免", "希望", "想去", "不去",
     "不能", "不想", "不吃", "带狗", "带猫", "同行", "靠近", "以内", "最多", "至少",
 )
+
+_DURABLE = re.compile(r"一直|平时|通常|习惯|长期|以后|今后|每次|一向|总是|从来|(?:我|本人)(?:不吃|不能吃|对.{1,12}过敏|吃不了|偏爱|更喜欢|喜欢|不喜欢|讨厌)")
+_TRIP_ONLY = re.compile(r"本次|这次|这趟|这回|这几天|这周|今天|明天|同行|出发|返回|\d{1,2}[月日号]|\d{4}[-/]")
+
+
+def durable_user_requirements(messages: list[str]) -> list[str]:
+    """Extract clearly stated ongoing wishes, never the assistant's itinerary."""
+    result = []
+    for message in messages:
+        for clause in preference_clauses(message):
+            if (
+                _DURABLE.search(clause) and not _TRIP_ONLY.search(clause)
+                and not any(term in clause for term in CREATIVE_ONLY_TERMS)
+                and is_actionable_requirement(clause) and clause not in result
+            ):
+                result.append(clause)
+    return result[:12]
+
+
+def remember_user_requirements(session: Session, memory: UserMemory, messages: list[str]) -> UserMemory:
+    """Automatically retain explicit ongoing requirements with a dated audit."""
+    mem_json = _upgrade_to_v3(memory)
+    if not mem_json.get("enabled", True):
+        return memory
+    items = [deepcopy(item) for item in mem_json.get("items", []) if isinstance(item, dict)]
+    existing = {str(item.get("id")) for item in items}
+    forgotten = set(mem_json.get("dismissed_explicit_ids") or [])
+    added = []
+    now = utcnow().isoformat()
+    for text in durable_user_requirements(messages):
+        item_id = _memory_item_id(text)
+        if item_id in existing or item_id in forgotten:
+            continue
+        items.append({
+            "id": item_id, "text": text, "category": memory_category(text),
+            "state": "saved", "enabled": True, "source_kind": "explicit_requirement",
+            "created_at": now, "updated_at": now,
+        })
+        added.append(item_id)
+        existing.add(item_id)
+    if not added:
+        return memory
+    mem_json["items"] = items
+    return _cas_write(
+        session, memory, mem_json=mem_json, source_type="conversation_preference",
+        source_id=f"conversation:{memory.version}:{hashlib.sha256('|'.join(added).encode()).hexdigest()[:12]}",
+        delta={"kind": "explicit_user_requirements", "added": added}, expected_version=memory.version,
+    )
 
 
 def memory_category(text: str, fallback: str = "other") -> str:
@@ -663,8 +712,8 @@ def record_trip_observation(
 ) -> UserMemory:
     """Store one replaceable photo-analysis snapshot for a trip.
 
-    This is evidence, not a preference: it never enters the planning context by
-    itself. Re-running the same generation operation is idempotent, while a new
+    Evidence is automatically consolidated into bounded activity suggestions.
+    Re-running the same generation operation is idempotent, while a new
     operation for the same trip replaces the old snapshot instead of inflating
     support counts.
     """
@@ -692,6 +741,7 @@ def record_trip_observation(
     observed_facts: list[str] = []
     scene_evidence: dict[str, list[dict[str, str]]] = {}
     useful_count = 0
+    type_assets: dict[str, set[str]] = {key: set() for key in memory_consolidation.SCENES}
     for item in getattr(analysis, "photos", []):
         if getattr(item, "suitability", "usable") == "unsuitable":
             continue
@@ -722,6 +772,9 @@ def record_trip_observation(
                 continue
             scene_tags.add(tag)
             asset_id = str(getattr(item, "asset_id", "") or "").strip()
+            for scene, (_, tags) in memory_consolidation.SCENES.items():
+                if asset_id and tag in tags:
+                    type_assets[scene].add(asset_id)
             image_url = str(getattr(source, "image_url", "") or "").strip()
             if asset_id and image_url.startswith("/static/uploads/"):
                 evidence = scene_evidence.setdefault(tag, [])
@@ -752,6 +805,11 @@ def record_trip_observation(
         if len(values) >= 2
     ]
     longest_same_day_span = max(daily_spans, default=0) / 60
+    checksums = sorted({
+        str(asset.checksum) for asset in session.exec(
+            select(FileAsset).where(FileAsset.user_id == user_id, FileAsset.id.in_(photo_input))
+        ).all() if asset.checksum
+    })
     snapshot = {
         "trip_id": trip_id,
         "operation_id": operation_id,
@@ -764,6 +822,8 @@ def record_trip_observation(
         "capture_hours": sorted(hours),
         "longest_same_day_span_hours": round(longest_same_day_span, 1),
         "scene_tags": sorted(scene_tags),
+        "travel_type_counts": {key: len(assets) for key, assets in type_assets.items()},
+        "source_fingerprint": hashlib.sha256("|".join(checksums).encode()).hexdigest() if checksums else None,
         "scene_evidence": {tag: rows[:8] for tag, rows in sorted(scene_evidence.items())},
         "observed_facts": observed_facts[:8],
         "updated_at": utcnow().isoformat(),
@@ -909,7 +969,7 @@ def patch_memory_item(
 ) -> UserMemory:
     memory = get_or_create_current_memory(session, user_id)
     _check_version(memory, expected_version)
-    mem_json = _upgrade_to_v3(memory)
+    mem_json = memory_consolidation.consolidate(_upgrade_to_v3(memory))
     items = [deepcopy(item) for item in mem_json.get("items", []) if isinstance(item, dict)]
     target = next((item for item in items if str(item.get("id")) == item_id), None)
     if target is None:
@@ -919,6 +979,8 @@ def patch_memory_item(
         if len(clean) < 2:
             raise InvalidParamError("旅行记忆不能为空")
         target["text"] = clean
+        if target.get("source_kind") == memory_consolidation.SOURCE_KIND:
+            target["source_kind"] = "manual"
         if category is not None:
             target["category"] = category if category in CATEGORY_LABELS else "other"
     elif category is not None:
@@ -950,11 +1012,14 @@ def delete_memory_item(
 ) -> UserMemory:
     memory = get_or_create_current_memory(session, user_id)
     _check_version(memory, expected_version)
-    mem_json = _upgrade_to_v3(memory)
+    mem_json = memory_consolidation.consolidate(_upgrade_to_v3(memory))
     items = [deepcopy(item) for item in mem_json.get("items", []) if isinstance(item, dict)]
     if not any(str(item.get("id")) == item_id for item in items):
         raise InvalidParamError("这条旅行记忆不存在或已被删除")
     mem_json["items"] = [item for item in items if str(item.get("id")) != item_id]
+    mem_json["dismissed_explicit_ids"] = sorted(set(mem_json.get("dismissed_explicit_ids") or []) | {item_id})
+    if item_id.startswith("automatic_scene_"):
+        mem_json["dismissed_automatic_ids"] = sorted(set(mem_json.get("dismissed_automatic_ids", [])) | {item_id})
     return _cas_write(
         session,
         memory,
@@ -999,6 +1064,7 @@ def _cas_write(
     session: Session, memory: UserMemory, *, mem_json: dict, source_type: str,
     source_id: str, delta: dict, expected_version: int, trip_id: str | None = None,
 ) -> UserMemory:
+    mem_json = memory_consolidation.consolidate(mem_json)
     new_version = expected_version + 1
     memory_text = (
         _render_v3_memory_text(mem_json)

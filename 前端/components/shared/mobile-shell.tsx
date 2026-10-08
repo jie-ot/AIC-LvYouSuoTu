@@ -10,7 +10,8 @@ export function MobileShell({
 }) {
   return (
     <div className="device-stage">
-      <main className={cn("mobile-shell", className)}>{children}</main>
+      <a href="#page-content" className="skip-link">跳到页面内容</a>
+      <div id="page-content" tabIndex={-1} className={cn("mobile-shell", className)}>{children}</div>
     </div>
   );
 }

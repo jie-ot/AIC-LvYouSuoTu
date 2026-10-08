@@ -1,7 +1,7 @@
 """Bounded, source-preserving memory selection for one planning request.
 
-Only saved and enabled items enter the model. Current explicit requirements
-win over stored memory. The final basis is a literal text match in the
+Enabled explicit requirements and automatically consolidated observations enter
+the model. Current explicit requirements win over stored memory. The final basis is a literal text match in the
 validated itinerary, not an assertion about the model's internal reasoning.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.models.dto import PlanningBrief
@@ -19,7 +20,7 @@ from app.models.itinerary import (
     PlanningMemoryItem,
     PlanningMemoryPhoto,
 )
-from app.services import memory_insight_service, memory_service
+from app.services import memory_consolidation, memory_insight_service, memory_service
 
 
 MAX_ITEMS = 6
@@ -37,6 +38,7 @@ _GENERAL_CATEGORIES = frozenset({"transport", "hotel", "pace", "food", "accessib
 _RELEVANCE_TERMS = (*_BASIS_TERMS, "自然", "文化", "历史", "古镇", "亲子", "徒步")
 _CONFLICT_TERMS = (*_RELEVANCE_TERMS, "打车", "海鲜", "早起", "晚起", "民宿", "酒店")
 _EXCLUSIVE = re.compile(r"只能|只坐|只住|必须|一定|首选|优先")
+_POSITIVE_CHOICE = re.compile(r"喜欢|偏爱|想去|想看|想吃|想要|想体验|要去|要看|要吃|(?:^|想|要|请|希望|帮我|只)安排|体验|参观|游览|选择|优先|首选|必须|只去|只看")
 _TRANSPORT_MODES = {"rail": ("高铁", "动车", "火车"), "air": ("飞机", "航班"), "car": ("自驾", "打车", "网约车")}
 _LODGING_MODES = {"hotel": ("酒店",), "homestay": ("民宿",)}
 _SCOPED_PLACE = re.compile(r"(?:在|到|去)([\u4e00-\u9fff]{2,8})(?=住|吃|玩|游|看|时|期间)")
@@ -54,7 +56,8 @@ def _current_clauses(brief: PlanningBrief | None, current_message: str) -> list[
     if brief is not None:
         texts.extend(filter(None, (
             brief.transport_preference, brief.lodging_preference, brief.budget,
-            brief.detail_requirements, *brief.constraints, *brief.interests,
+            brief.detail_requirements, *brief.constraints,
+            *(f"想体验{interest}" for interest in brief.interests),
         )))
     return [clause for value in texts for clause in memory_service.preference_clauses(value)]
 
@@ -72,6 +75,10 @@ def _conflicts(memory_text: str, category: str, current_clauses: list[str]) -> b
                 continue
             stored_polarity = memory_service.preference_term_polarity(memory_text, term)
             current_polarity = memory_service.preference_term_polarity(clause, term)
+            if current_polarity > 0 and not _POSITIVE_CHOICE.search(clause):
+                # Mentioning an activity in a question is not a preference
+                # correction ("自然景观有哪些" must not erase "不要自然景观").
+                current_polarity = 0
             if stored_polarity * current_polarity < 0:
                 return True
         if category == "pace":
@@ -118,6 +125,8 @@ def _prompt_payload(items: list[PlanningMemoryItem]) -> dict[str, Any]:
             "id": item.id, "text": item.text, "category": item.category,
             "sourceKind": item.source_kind,
         }
+        if item.source_kind == memory_consolidation.SOURCE_KIND:
+            row.update(usage="soft_activity_reference", supportCount=item.support_count)
         trip_ids = list(dict.fromkeys([
             *([item.source_trip_id] if item.source_trip_id else []),
             *item.source_trip_ids,
@@ -130,7 +139,7 @@ def _prompt_payload(items: list[PlanningMemoryItem]) -> dict[str, Any]:
         return row
 
     return {
-        "priority": "本次用户明确需求高于历史记忆；冲突时忽略历史记忆。来源 ID 只供追溯，不能推断偏好强度。照片观察未确认前不得当作偏好。",
+        "priority": "本次明确需求优先，其次是用户明确的长期要求，最后才是照片自动线索。自动线索只用于同等可行活动之间的轻量选择；一次旅行不能证明长期喜好，不得据此更改目的地、日期、预算、交通或同行条件。不得从照片推断健康、身份或忌口。冲突时忽略自动线索，来源 ID 只供追溯。",
         "selected": [model_item(item) for item in items],
     }
 
@@ -150,7 +159,7 @@ def select_memory(
     context_destinations: list[str] | None = None,
     excluded_memory_ids: list[str] | None = None,
 ) -> PlanningMemoryContext:
-    raw = memory_json if isinstance(memory_json, dict) else {}
+    raw = memory_consolidation.consolidate(memory_json)
     observations = raw.get("trip_observations") if isinstance(raw.get("trip_observations"), dict) else {}
     items = raw.get("items") if isinstance(raw.get("items"), list) else []
     candidates = [
@@ -174,6 +183,7 @@ def select_memory(
         " ".join(interests),
     ]))
     ranked: list[PlanningMemoryItem] = []
+    metadata = {}
     for raw_item in candidates:
         text = " ".join(str(raw_item.get("text") or "").strip().split())
         category = str(raw_item.get("category") or "other")
@@ -189,17 +199,29 @@ def select_memory(
         destination_match = any(destination in text for destination in destinations if len(destination) >= 2)
         interest_match = any(term in text and term in query for term in _RELEVANCE_TERMS)
         scene_match = _scene_matches(raw_item, destinations, interests)
-        if category not in _GENERAL_CATEGORIES and not (destination_match or interest_match or scene_match):
+        automatic = raw_item.get("source_kind") == memory_consolidation.SOURCE_KIND
+        # Automatic scene observations can guide an otherwise open itinerary.
+        # A user-specified focus narrows them before anything enters the model.
+        if automatic and interests and not (interest_match or scene_match):
             continue
-        score = 1
+        exclusive_focus = any(
+            _EXCLUSIVE.search(clause) and any(term in clause for term in _RELEVANCE_TERMS)
+            for clause in current_clauses
+        )
+        if automatic and exclusive_focus and not (interest_match or scene_match):
+            continue
+        if not automatic and category not in _GENERAL_CATEGORIES and not (
+            destination_match or interest_match or scene_match or _HARD_CONSTRAINT.search(text)
+        ):
+            continue
+        score = 1 + min(3, int(raw_item.get("support_count") or 0)) if automatic else 10
         if _HARD_CONSTRAINT.search(text):
             score += 3
         if category != "other" and any(
             word in query for word in memory_service.CATEGORY_KEYWORDS.get(category, ())
         ):
             score += 2
-        # A literal destination or activity overlap is useful but never turns
-        # a photo observation into a preference; those are absent from items.
+        # Relevance affects selection; it does not make an observation a rule.
         if destination_match:
             score += 3
         if interest_match:
@@ -232,17 +254,34 @@ def select_memory(
                 trip_id=photo.trip_id, asset_id=photo.asset_id, image_url=photo.image_url,
             ) for photo in source_photos],
             relevance_score=score,
+            support_count=int(raw_item.get("support_count") or 0),
         ))
+        metadata[item_id] = raw_item
     ranked.sort(key=lambda item: (-item.relevance_score, item.id))
-    # Two enabled saved instructions can contradict each other. With no
-    # current user resolution, feeding either one is arbitrary; omit both.
+    def wins(left: PlanningMemoryItem, right: PlanningMemoryItem) -> bool:
+        left_auto = left.source_kind == memory_consolidation.SOURCE_KIND
+        right_auto = right.source_kind == memory_consolidation.SOURCE_KIND
+        if left_auto != right_auto:
+            return not left_auto
+        if left_auto:
+            return False
+        try:
+            def stamp(item):
+                value = datetime.fromisoformat(str(metadata[item.id].get("updated_at") or ""))
+                return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+            return stamp(left) > stamp(right)
+        except ValueError:
+            return False
+
+    # Explicit corrections supersede weaker observations and older statements.
+    # An unresolved same-time conflict still supplies neither side.
     ranked = [
         item for item in ranked
         if not any(
             other.id != item.id and other.category == item.category and (
                 _conflicts(item.text, item.category, [other.text])
                 or _conflicts(other.text, other.category, [item.text])
-            )
+            ) and not wins(item, other)
             for other in ranked
         )
     ]
@@ -250,6 +289,10 @@ def select_memory(
     for item in ranked:
         if len(selected) >= MAX_ITEMS:
             break
+        if item.source_kind == memory_consolidation.SOURCE_KIND and sum(
+            entry.source_kind == memory_consolidation.SOURCE_KIND for entry in selected
+        ) >= 2:
+            continue
         trial = [*selected, item]
         payload = json.dumps(_prompt_payload(trial), ensure_ascii=False, separators=(",", ":"))
         if len(payload) <= MAX_PROMPT_CHARS:

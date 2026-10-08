@@ -56,6 +56,13 @@ def report_to_dto(
         )
     except Exception:
         profile_data = None
+    if profile_data is not None:
+        # Retire profile-control prompts in existing reports without rewriting
+        # their stored narrative or source evidence.
+        for stop in profile_data.next_stops:
+            stop.planning_prompt = f"我想去{stop.destination}，请帮我安排下一次旅行。"
+        for experiment, stop in zip(profile_data.next_trip_experiments, profile_data.next_stops):
+            experiment.planning_prompt = stop.planning_prompt
     return dto.Report(
         id=entity.id,
         trip_id=entity.trip_id,

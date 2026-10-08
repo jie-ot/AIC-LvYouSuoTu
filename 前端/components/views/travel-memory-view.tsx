@@ -3,15 +3,12 @@
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import {
-  Camera,
   Check,
   ChevronDown,
   ChevronRight,
-  Layers3,
   MapPinned,
   Pencil,
   Plus,
-  Route,
   Trash2,
   X,
 } from "lucide-react"
@@ -19,7 +16,6 @@ import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
 import { ConfirmDialog } from "@/components/shared/confirm-dialog"
 import {
-  confirmTravelMemoryPattern,
   createTravelMemoryItem,
   deleteTravelPhotoObservation,
   deleteTravelMemoryItem,
@@ -31,7 +27,6 @@ import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 import type {
   TravelMemoryDescription,
   TravelMemoryDisplay,
-  TravelMemoryPattern,
   TravelMemoryFootprint,
 } from "@/types"
 
@@ -45,8 +40,6 @@ const CATEGORIES = [
   ["attractions", "想去的地方"],
   ["other", "其他"],
 ] as const
-
-const PATTERN_ICONS = { photos: Camera, plans: Route, combined: Layers3 } as const
 
 export function TravelMemoryView() {
   const { toast, toastError } = useApp()
@@ -69,10 +62,6 @@ export function TravelMemoryView() {
   )
   const suggested = useMemo(
     () => memory?.memories.filter((item) => item.state === "candidate") ?? [],
-    [memory],
-  )
-  const patterns = useMemo(
-    () => memory?.patterns.filter((item) => !item.confirmed) ?? [],
     [memory],
   )
   const footprints = memory?.footprints ?? []
@@ -166,30 +155,9 @@ export function TravelMemoryView() {
               </section>
             ) : null}
 
-            {patterns.length ? (
-              <section className="memory-section">
-                <div className="memory-section-title"><h2>旅行线索，等你判断</h2><span>{patterns.length}</span></div>
-                <p className="memory-pattern-explain">照片记录了出现过的场景，旧规划记录了原先的安排；两者都不能证明你喜欢。确认后才会作为后续规划偏好，你可以停用或删除。</p>
-                <div className="memory-pattern-list">
-                  {patterns.map((item) => (
-                    <PatternRow
-                      key={item.id}
-                      item={item}
-                      busy={busy === item.id}
-                      onConfirm={() => update(
-                        item.id,
-                        () => confirmTravelMemoryPattern(item.id, memory.version),
-                        "已用于后续规划",
-                      )}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
             {suggested.length ? (
               <section className="memory-section">
-                <div className="memory-section-title"><h2>待你确认</h2><span>{suggested.length}</span></div>
+                <div className="memory-section-title"><h2>可补充的要求</h2><span>{suggested.length}</span></div>
                 <div className="memory-list">
                   {suggested.map((item) => (
                     <MemoryRow
@@ -211,7 +179,8 @@ export function TravelMemoryView() {
             ) : null}
 
             <section className="memory-section">
-              <div className="memory-section-title"><h2>你的要求</h2><span>{saved.length}</span></div>
+              <div className="memory-section-title"><h2>为你记住</h2><span>{saved.length}</span></div>
+              <p className="memory-pattern-explain">会从旅行照片中自动整理线索，结合你这次的要求安排下一程。你可以随时修改或删除。</p>
               {saved.length ? (
                 <div className="memory-list">
                   {saved.map((item) => (
@@ -239,13 +208,13 @@ export function TravelMemoryView() {
             </section>
 
             <section className="memory-setting-row">
-              <span><strong>规划时使用已保存要求</strong></span>
+              <span><strong>自动参考旅行记忆</strong></span>
               <button
                 type="button"
                 className={`switch-control ${memory.enabled === false ? "" : "is-on"}`}
                 role="switch"
                 aria-checked={memory.enabled !== false}
-                aria-label="规划时使用已保存要求"
+                aria-label="自动参考旅行记忆"
                 disabled={busy !== null}
                 onClick={() => update(
                   "settings",
@@ -305,7 +274,7 @@ export function TravelMemoryView() {
 
       <ConfirmDialog
         open={Boolean(pendingDelete)}
-        title="删除这条旅行要求？"
+        title="删除这条旅行记忆？"
         description={pendingDelete?.content ?? ""}
         onClose={() => setPendingDelete(null)}
         actions={[
@@ -329,7 +298,7 @@ export function TravelMemoryView() {
       <ConfirmDialog
         open={Boolean(pendingObservationDelete)}
         title="清除这次旅行的照片线索？"
-        description="只清除旅行记忆中的照片观察。原始照片、明信片和旅行记录仍保留；依赖这些线索确认的偏好也会移除。"
+        description="清除后，这次旅行的照片线索将不再用于后续规划。原始照片、明信片和旅行记录仍保留。"
         onClose={() => setPendingObservationDelete(null)}
         actions={[
           {
@@ -353,33 +322,6 @@ export function TravelMemoryView() {
 
 function MemoryStat({ value, label }: { value: number; label: string }) {
   return <div><strong>{value}</strong><span>{label}</span></div>
-}
-
-function PatternRow({ item, busy, onConfirm }: {
-  item: TravelMemoryPattern
-  busy: boolean
-  onConfirm: () => void
-}) {
-  const Icon = PATTERN_ICONS[item.sourceKind]
-  return (
-    <article className="memory-pattern-row">
-      <span className="memory-pattern-icon"><Icon size={19} aria-hidden /></span>
-      <div>
-        <strong>{item.title}</strong>
-        <p>{item.content}</p>
-        <div className="memory-pattern-sources">{item.sourceLabels.map((label) => <span key={label}>{label}</span>)}</div>
-        {item.sourcePhotos?.length ? <div className="memory-pattern-photos" aria-label="支持这条线索的照片">
-          {item.sourcePhotos.slice(0, 4).map((photo) => <a key={photo.assetId} href={resolveAssetUrl(photo.imageUrl)} target="_blank" rel="noreferrer" aria-label="查看来源照片">
-            <img src={resolveAssetUrl(photo.imageUrl)} alt="来源旅行照片" onError={handleImageError} />
-          </a>)}
-          {item.sourcePhotos.length > 4 ? <span>另有 {item.sourcePhotos.length - 4} 张</span> : null}
-        </div> : null}
-      </div>
-      {item.confirmable ? (
-        <button type="button" onClick={onConfirm} disabled={busy}>{busy ? "保存中…" : "确认下次也想体验"}</button>
-      ) : null}
-    </article>
-  )
 }
 
 function MemoryRow({ item, busy, actionLabel, onAction, onToggle, onEdit, onDelete }: {

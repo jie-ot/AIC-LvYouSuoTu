@@ -74,7 +74,7 @@ def build_postcard_creative_user_text(
         for idx, asset_id in enumerate(selected_asset_ids, start=1)
     )
     selection_manifest = "\n".join(
-        f"明信片{idx}：source_asset_ids="
+        f"明信片{idx}的主素材（保留为本张 source_asset_ids 的第一项）："
         + json.dumps(item.source_asset_ids, ensure_ascii=False)
         for idx, item in enumerate(selection.items, start=1)
     )
@@ -85,6 +85,14 @@ def build_postcard_creative_user_text(
         f"{selection_manifest}\n\n"
         "【随消息附加的原图顺序】\n"
         f"{image_manifest}\n\n"
+        "【可选组合与引用规则】\n每张可从上述候选中选择 1–3 张；主素材排第一，"
+        "其他图片仅在与主素材有具体关联且确有必要时选用，并在 design_concept 中说明关系；"
+        "仅同城、同类题材或颜色相近不足以组合，关系不明就只用主素材。"
+        "按照片选定少量有辨识度的特征；可以整体绘画化、提取主体和重新构图，其他细节由设计取舍。"
+        "在 image_prompt 中用 [[asset_id]] 引用具体素材，asset_id 必须来自清单；"
+        "例如 [[asset_abc]]。后端按本张 source_asset_ids 顺序替换成图片1、图片2等，"
+        "不要使用本次批量输入的图片编号。subject_focus 按同一顺序写明主体及少量关键特征，不穷举所有物件；"
+        "未选择的候选不会传给生图模型。\n\n"
         "【已选照片的语义信息】\n"
         + json.dumps(analysis.model_dump(), ensure_ascii=False)
     )

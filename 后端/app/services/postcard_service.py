@@ -7,6 +7,8 @@ automatically inside the reference release.
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from sqlmodel import Session, select
 
 from app.core.exceptions import NotFoundError
@@ -25,18 +27,18 @@ def list_postcard_groups(session: Session, user_id: str) -> list[dto.PostcardGro
         .order_by(PostcardGroupEntity.created_at.desc())
     ).all()
 
-    result: list[dto.PostcardGroup] = []
-    for group in groups:
-        postcards = session.exec(
-            select(PostcardEntity)
-            .where(
-                PostcardEntity.group_id == group.id,
-                PostcardEntity.user_id == user_id,
-            )
-            .order_by(PostcardEntity.sort_order.asc())
-        ).all()
-        result.append(mappers.postcard_group_to_dto(group, list(postcards)))
-    return result
+    if not groups:
+        return []
+    postcards = session.exec(
+        select(PostcardEntity)
+        .join(PostcardGroupEntity, PostcardEntity.group_id == PostcardGroupEntity.id)
+        .where(PostcardEntity.user_id == user_id, PostcardGroupEntity.user_id == user_id)
+        .order_by(PostcardEntity.sort_order.asc(), PostcardEntity.id.asc())
+    ).all()
+    by_group: dict[str, list[PostcardEntity]] = defaultdict(list)
+    for postcard in postcards:
+        by_group[postcard.group_id].append(postcard)
+    return [mappers.postcard_group_to_dto(group, by_group[group.id]) for group in groups]
 
 
 def delete_postcard_group(user_id: str, group_id: str) -> None:

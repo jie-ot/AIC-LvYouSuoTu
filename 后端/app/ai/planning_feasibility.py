@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.models.itinerary import ItineraryData, Schedule
+from app.ai.transport_facts import normalize_transport_fact
+from app.services.schedule_kind import classify_schedule, fact_for_schedule
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class Problem:
     date: str | None = None
     schedule_id: str | None = None
     resolution: Literal["model_repair", "defer", "advisory"] = "model_repair"
+    user_note: str | None = None
 
 
 FLIGHT_TOOLS = frozenset(
@@ -136,6 +139,44 @@ def lodging_consistency_problems(data: ItineraryData) -> list[Problem]:
     return problems
 
 
+def repeated_attraction_problems(data: ItineraryData, facts: dict, user_text: str = "") -> list[Problem]:
+    """Catch repeated main visits; recurring meals, hotels and transfers are fine."""
+    visits: dict[str, list[tuple[str, Schedule]]] = {}
+    for day in data.itinerary:
+        for schedule in day.schedules:
+            fact = fact_for_schedule(schedule, facts)
+            if classify_schedule(schedule, fact) != "attraction" or not schedule.place_name:
+                continue
+            if any(word in schedule.activity for word in ("早餐", "午餐", "晚餐", "用餐", "取行李", "返回酒店")):
+                continue
+            name = re.sub(r"[\s（）()]", "", schedule.place_name)
+            poi_id = str((fact or {}).get("poi_id") or "")
+            city = str((fact or {}).get("city_name") or (fact or {}).get("city") or schedule.map_group or "")
+            key = f"poi:{poi_id}" if poi_id else f"{city}:{name}"
+            visits.setdefault(key, []).append((day.date, schedule))
+    problems = []
+    for rows in visits.values():
+        days = list(dict.fromkeys(day for day, _ in rows))
+        if len(days) < 2:
+            continue
+        name = str(rows[0][1].place_name)
+        # Only a user's request justifies repeated visits, not the model adding
+        # "再访" or "补拍" to otherwise duplicated sightseeing rows.
+        requested_repeat = any(
+            re.search(r"重游|重访|再去|多次|两次|每天|清晨.*夜|白天.*晚", clause)
+            and any(name[start:start + 3] in clause for start in range(max(0, len(name) - 2))
+                    if name[start:start + 3] not in {"博物馆", "风景区", "步行街"})
+            for clause in re.split(r"[，。；\n]", user_text)
+        )
+        if requested_repeat:
+            continue
+        problems.append(Problem(
+            message=f"{name} 被安排在 {'、'.join(days)} 多次作为主要游览点，用户未要求重访；保留一次完整游览，其他日期改为附近不同且有事实支持的体验，资料不足时留出自由时间，不得靠重复景点凑数",
+            blocking=False, date=days[1], schedule_id=rows[1][1].id,
+        ))
+    return problems
+
+
 def _tool_of(fact: dict[str, Any]) -> str:
     return str(fact.get("tool") or "")
 
@@ -182,7 +223,10 @@ def _is_transport_leg(
     if schedule.transport_mode in _CITY_TRANSPORT_MODES:
         return False
     text = _schedule_text(schedule)
-    if _INTERCITY_MARKER_PATTERN.search(text):
+    if schedule.transport in {"飞机", "高铁", "动车", "火车", "列车"} or re.search(
+        r"(?:乘坐|搭乘|乘|搭|坐)[^，。；;（）()]{0,10}(?:飞机|航班|高铁|动车|火车|列车|卧铺)(?!站)|乘机|飞往",
+        text,
+    ):
         return True
     if not transport_facts:
         return False
@@ -278,10 +322,14 @@ def _defer_clock(schedule: Schedule, period: str) -> None:
     schedule.end_time = None
     schedule.time_period = period
     schedule.fact_status = "unverified"
+    # No timetable is different from contradicting one. Reapplying deferral
+    # after repair must not accumulate both warnings.
+    for note in (_DEFERRED_CLOCK_NOTE, UNCONFIRMED_NOTE):
+        schedule.activity = schedule.activity.replace(f"（{note}）", "").replace(f"({note})", "")
     schedule.activity = _CLOCK_IN_TEXT.sub("待确认", schedule.activity)
     if schedule.transport:
         schedule.transport = _CLOCK_IN_TEXT.sub("待确认", schedule.transport)
-    if _DEFERRED_CLOCK_NOTE not in schedule.activity:
+    if not re.search(r"待.{0,12}(?:确认|核实)|开售后|按.{0,12}班次顺延", schedule.activity):
         schedule.activity = f"{schedule.activity.rstrip()}（{_DEFERRED_CLOCK_NOTE}）"
 
 
@@ -312,6 +360,11 @@ def autofix(
     for day in repaired.itinerary:
         for schedule in day.schedules:
             label = f"{day.date} {schedule.id}"
+            if schedule.location and re.fullmatch(r"\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*", schedule.location):
+                first, second = schedule.location.split(",", 1)
+                if abs(float(first)) <= 90 < abs(float(second)) <= 180:
+                    schedule.location = f"{second.strip()},{first.strip()}"
+                    applied.append(f"{label} 纠正了经纬度顺序")
             stale = [ref for ref in schedule.fact_refs if ref not in facts]
             if stale:
                 schedule.fact_refs = [
@@ -385,13 +438,14 @@ def annotate_unresolved(
                 continue
             schedule.fact_status = "unverified"
             activity = (schedule.activity or "").strip()
-            if UNCONFIRMED_NOTE not in activity:
+            note = flagged[(day.date, schedule.id)].user_note or UNCONFIRMED_NOTE
+            if note not in activity:
                 schedule.activity = (
-                    f"{activity}（{UNCONFIRMED_NOTE}）"
+                    f"{activity}（{note}）"
                     if activity
-                    else UNCONFIRMED_NOTE
+                    else note
                 )
-            applied.append(f"{day.date} {schedule.id} 已标注为时刻待确认")
+            applied.append(f"{day.date} {schedule.id} 已标注待核对")
     for date in dates:
         advisory = _DAY_ADVISORY.format(date=date)
         annotated.advisories.append(advisory)
@@ -537,7 +591,7 @@ def _usable_facts(
     retained_facts: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
     return {
-        str(fact_id): fact
+        str(fact_id): normalize_transport_fact(fact)
         for fact_id, fact in (retained_facts or {}).items()
         if isinstance(fact, dict)
     }
@@ -761,6 +815,24 @@ def _intercity_problems(
             resolution="defer",
         ))
         return problems
+
+    named = _mentioned_codes(text)
+    if named:
+        matching = [fact for fact in transport_facts if _transport_codes(fact) & named]
+        if matching:
+            transport_facts = matching
+        elif not invented:
+            problems.append(Problem(
+                message=f"{label} 所引用的交通事实不属于该条实际乘坐的班次，请引用对应班次的事实 ID",
+                date=date, schedule_id=schedule.id,
+            ))
+    for fact in transport_facts:
+        departure = str(fact.get("depart_datetime") or "")
+        if re.match(r"\d{4}-\d{2}-\d{2}", departure) and departure[:10] != date:
+            problems.append(Problem(
+                message=f"{label} 引用的是 {departure[:10]} 的班次，不是行程当天；请重新选择同日班次",
+                date=date, schedule_id=schedule.id,
+            ))
 
     allowed_departures = sorted(
         {

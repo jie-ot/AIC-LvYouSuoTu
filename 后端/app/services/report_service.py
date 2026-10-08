@@ -23,16 +23,14 @@ def list_reports(session: Session, user_id: str) -> list[dto.Report]:
         .where(ReportEntity.user_id == user_id)
         .order_by(ReportEntity.created_at.desc())
     ).all()
+    paths = file_asset_service.list_reference_paths_by_owner(
+        session, user_id=user_id, owner_type="report",
+        owner_ids=[report.id for report in reports], role="source_photo",
+    )
     return [
         mappers.report_to_dto(
             report,
-            source_images=file_asset_service.list_reference_paths(
-                session,
-                user_id=user_id,
-                owner_type="report",
-                owner_id=report.id,
-                role="source_photo",
-            ),
+            source_images=paths.get(report.id, []),
         )
         for report in reports
     ]

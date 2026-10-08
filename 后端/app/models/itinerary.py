@@ -142,7 +142,7 @@ class PlanningMemoryPhoto(BaseModel):
 
 
 class PlanningMemoryItem(BaseModel):
-    """A saved, enabled memory actually supplied to this planning request."""
+    """An explicit requirement or source-backed observation supplied to planning."""
 
     id: str
     text: str
@@ -154,6 +154,7 @@ class PlanningMemoryItem(BaseModel):
     source_trip_ids: list[str] = Field(default_factory=list)
     source_photos: list[PlanningMemoryPhoto] = Field(default_factory=list)
     relevance_score: int = 0
+    support_count: int = 0
 
 
 class PlanningMemoryContext(BaseModel):

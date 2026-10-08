@@ -74,7 +74,7 @@ _STAGE_LABELS: dict[str, str] = {
     "queued": "正在准备规划任务",
     "reading_memory": "正在读取旅行记忆",
     "collecting_requirements": "正在梳理本次旅行需求",
-    "prefetching_facts": "正在预取基础事实",
+    "prefetching_facts": "正在查询出行信息",
     "understanding_request": "正在理解本次旅行需求",
     "researching": "正在查询交通、住宿与景点信息",
     "research_complete": "查询完成，正在整理行程信息",
@@ -85,19 +85,13 @@ _STAGE_LABELS: dict[str, str] = {
     "completed": "行程已生成",
     "failed": "规划未能完成",
 }
-# Observed wall time for a full multi-city plan; used only until enough progress
-# has accumulated to extrapolate from the real pace.
-_DEFAULT_TOTAL_MS = sum(_STAGE_EXPECTED_MS.values())
-_MIN_TOTAL_MS = 60_000
-_MAX_TOTAL_MS = 900_000
-
-
 @dataclass
 class _Session:
     token: str
     started: float = field(default_factory=time.monotonic)
     created_at: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.monotonic)
+    finished: float | None = None
     stage_started: float = field(default_factory=time.monotonic)
     round_started: float = field(default_factory=time.monotonic)
     stage: str = "queued"
@@ -115,7 +109,7 @@ class _Session:
     recent_activities: list[str] = field(default_factory=list)
 
     def elapsed_ms(self) -> int:
-        return int((time.monotonic() - self.started) * 1000)
+        return int(((self.finished or time.monotonic()) - self.started) * 1000)
 
 
 _sessions: dict[str, _Session] = {}
@@ -180,12 +174,17 @@ def report(
             session.stage = stage
             session.phase = _phase_for_stage(stage)
             session.stage_started = now
+            if stage in {"completed", "failed"}:
+                session.finished = now
         previous_round = session.research_round
+        previous_repair = session.repair_round
         for key, value in fields.items():
             if value is not None and hasattr(session, key):
                 setattr(session, key, value)
         if session.research_round != previous_round:
             session.round_started = now
+        if session.repair_round != previous_repair:
+            session.stage_started = now
         if detail is not None:
             session.detail = detail
         if activity:
@@ -228,6 +227,7 @@ def fail(message: str) -> None:
         session.phase = "failed"
         session.error = message[:300]
         session.updated = time.monotonic()
+        session.finished = session.updated
 
 
 def snapshot(token: str | None) -> dict[str, Any] | None:
@@ -249,7 +249,7 @@ def _snapshot_locked(session: _Session) -> dict[str, Any]:
     # reports nothing for minutes, and a frozen bar reads as a hang.
     session.percent = max(session.percent, _percent_for(session))
     percent = round(session.percent, 1)
-    estimated_total = _estimated_total_ms(elapsed_ms, session.percent, session.stage)
+    estimated_total = elapsed_ms + _estimated_remaining_ms(session)
     return {
         "token": session.token,
         "stage": session.stage,
@@ -318,14 +318,25 @@ def _research_ratio(session: _Session) -> float:
     return min(1.0, (completed + within) / horizon)
 
 
-def _estimated_total_ms(elapsed_ms: int, percent: float, stage: str) -> int:
-    if stage == "completed":
-        return elapsed_ms
-    if percent < 8 or elapsed_ms < 3_000:
-        return max(_DEFAULT_TOTAL_MS, elapsed_ms)
-    projected = int(elapsed_ms * 100 / percent)
-    # The estimate must never promise a finish time already in the past.
-    return max(_MIN_TOTAL_MS, min(_MAX_TOTAL_MS, max(projected, elapsed_ms + 5_000)))
+def _estimated_remaining_ms(session: _Session) -> int:
+    """Estimate remaining work, not elapsed time divided by a cosmetic percent."""
+    if session.stage in {"completed", "failed"}:
+        return 0
+    durations = {**_STAGE_EXPECTED_MS, "queued": 2_000, "research_complete": 2_000,
+                 "verifying": 180_000 if session.repair_round else 30_000, "finalizing": 30_000}
+    after = {
+        "queued": ("understanding_request", "researching", "synthesizing", "verifying", "finalizing"),
+        "reading_memory": ("understanding_request", "researching", "synthesizing", "verifying", "finalizing"),
+        "understanding_request": ("researching", "synthesizing", "verifying", "finalizing"),
+        "researching": ("synthesizing", "verifying", "finalizing"),
+        "research_complete": ("synthesizing", "verifying", "finalizing"),
+        "selecting_facts": ("synthesizing", "verifying", "finalizing"),
+        "synthesizing": ("verifying", "finalizing"),
+        "verifying": ("finalizing",),
+    }
+    elapsed = int((time.monotonic() - session.stage_started) * 1000)
+    remaining = max(0, durations.get(session.stage, 20_000) - elapsed)
+    return int(remaining + sum(durations[stage] for stage in after.get(session.stage, ())))
 
 
 def _evict_locked() -> None:

@@ -8,7 +8,7 @@ from sqlmodel import Session
 
 from app.models.dto import MemoryDisplayItem, TravelMemoryDisplay
 from app.models.user_memory import UserMemory
-from app.services import memory_insight_service
+from app.services import memory_consolidation, memory_insight_service
 from app.services.memory_service import CATEGORY_LABELS, _upgrade_to_v3
 
 ICONS = {
@@ -33,7 +33,7 @@ class MemoryDisplayAdapter:
         session: Session | None = None,
         user_id: str | None = None,
     ) -> TravelMemoryDisplay:
-        mem_json = _upgrade_to_v3(memory)
+        mem_json = memory_consolidation.consolidate(_upgrade_to_v3(memory))
         items: list[MemoryDisplayItem] = []
         for raw in mem_json.get("items", []):
             if not isinstance(raw, dict):
@@ -48,8 +48,13 @@ class MemoryDisplayAdapter:
             source_trip_ids = [
                 str(value) for value in raw.get("source_trip_ids", []) if value
             ] if isinstance(raw.get("source_trip_ids"), list) else []
-            if source_kind == "observed_pattern":
+            if source_kind == memory_consolidation.SOURCE_KIND:
+                source_label = f"自动整理 · {raw.get('support_count', len(source_trip_ids))} 次独立旅行"
+                source_trip_id = source_trip_ids[0] if source_trip_ids else None
+            elif source_kind == "observed_pattern":
                 source_label = f"根据 {len(source_trip_ids)} 次旅行确认"
+            elif source_kind == "explicit_requirement" and not source_trip_id:
+                source_label = "你在对话中提到"
             else:
                 source_label = (
                     str(raw.get("source_trip_title") or "").strip()
@@ -66,9 +71,9 @@ class MemoryDisplayAdapter:
                 origin=(
                     "explicit_requirement"
                     if source_kind == "explicit_requirement"
-                    else "inferred" if source_kind == "observed_pattern" else "manual"
+                    else "inferred" if source_kind in {"observed_pattern", memory_consolidation.SOURCE_KIND} else "manual"
                 ),
-                confidence=1.0 if state == "active" else 0.0,
+                confidence=float(raw.get("confidence", 1.0 if state == "active" else 0.0)),
                 confirmation_text=content if state == "candidate" else None,
                 enabled=bool(raw.get("enabled", state == "active")),
                 category=category,

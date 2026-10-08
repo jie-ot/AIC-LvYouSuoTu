@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { MoreHorizontal } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -30,6 +30,7 @@ export function ActionMenu({ items, label = "更多操作" }: { items: MenuItem[
   const [coords, setCoords] = useState<Coords | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const menuId = useId()
 
   const computeCoords = useCallback(() => {
     const btn = btnRef.current
@@ -48,6 +49,10 @@ export function ActionMenu({ items, label = "更多操作" }: { items: MenuItem[
   useLayoutEffect(() => {
     if (open) computeCoords()
   }, [open, computeCoords])
+
+  useEffect(() => {
+    if (open && coords) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus({ preventScroll: true })
+  }, [open, coords])
 
   useEffect(() => {
     if (!open) return
@@ -89,6 +94,10 @@ export function ActionMenu({ items, label = "更多操作" }: { items: MenuItem[
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setOpen(true) }
+        }}
       >
         <MoreHorizontal className="size-5" strokeWidth={2.15} aria-hidden />
       </button>
@@ -99,7 +108,20 @@ export function ActionMenu({ items, label = "更多操作" }: { items: MenuItem[
         createPortal(
           <div
             ref={menuRef}
+            id={menuId}
             role="menu"
+            aria-label={label}
+            onBlur={(event) => {
+              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+            }}
+            onKeyDown={(event) => {
+              if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return
+              event.preventDefault()
+              const controls = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+              const current = controls.indexOf(document.activeElement as HTMLButtonElement)
+              const next = event.key === "Home" ? 0 : event.key === "End" ? controls.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + controls.length) % controls.length
+              controls[next]?.focus({ preventScroll: true })
+            }}
             onClick={(e) => e.stopPropagation()}
             style={{
               position: "fixed",

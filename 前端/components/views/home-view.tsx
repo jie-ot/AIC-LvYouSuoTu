@@ -1,24 +1,16 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import Link from "next/link"
 import { ArrowRight, CalendarDays, Camera, FileText, Map, Plus, Route, X } from "lucide-react"
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
+import { Modal } from "@/components/shared/modal"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 
 export function HomeView() {
   const { trips, loadError, reloadAll } = useApp()
   const [creating, setCreating] = useState(false)
-
-  useEffect(() => {
-    if (!creating) return
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCreating(false)
-    }
-    document.addEventListener("keydown", closeOnEscape)
-    return () => document.removeEventListener("keydown", closeOnEscape)
-  }, [creating])
 
   return (
     <div className="app-page trips-page">
@@ -44,7 +36,7 @@ export function HomeView() {
               <Link key={trip.id} href={`/trips/detail?tripId=${encodeURIComponent(trip.id)}`} className={`trip-card ${trip.coverImage ? "has-cover" : "no-cover"}`}>
                 <div className="trip-cover">
                   {trip.coverImage ? (
-                    <img src={resolveAssetUrl(trip.coverImage)} alt="" onError={handleImageError} />
+                    <img src={resolveAssetUrl(trip.coverImage)} alt="" loading="lazy" decoding="async" onError={handleImageError} />
                   ) : (
                     <div className="trip-cover-empty"><Map size={30} aria-hidden /></div>
                   )}
@@ -73,9 +65,8 @@ export function HomeView() {
         )}
       </main>
 
-      {creating ? (
-        <div className="action-sheet-backdrop" onClick={() => setCreating(false)}>
-          <section className="action-sheet" role="dialog" aria-modal="true" aria-label="新建旅行" onClick={(event) => event.stopPropagation()}>
+      <Modal open={creating} onClose={() => setCreating(false)} className="action-modal" label="新建旅行">
+          <section className="action-sheet">
             <div className="action-sheet-title">
               <h2>新建旅行</h2>
               <button type="button" onClick={() => setCreating(false)} aria-label="关闭"><X size={18} /></button>
@@ -83,8 +74,7 @@ export function HomeView() {
             <Link href="/create"><Camera size={20} /><span>用照片创建</span><ArrowRight size={17} /></Link>
             <Link href="/planning"><Route size={20} /><span>规划新旅行</span><ArrowRight size={17} /></Link>
           </section>
-        </div>
-      ) : null}
+      </Modal>
 
       <BottomNav />
     </div>

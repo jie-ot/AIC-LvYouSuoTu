@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useId, useRef, type ReactNode } from "react"
-import { useApp } from "@/components/shared/app-context"
+import { useId, type ReactNode } from "react"
+import { Modal } from "./modal"
 import { cn } from "@/lib/utils"
 
 export interface DialogAction {
@@ -26,46 +26,13 @@ export function ConfirmDialog({
   onClose: () => void
   icon?: ReactNode
 }) {
-  const { registerBackHandler } = useApp()
   const titleId = useId()
   const descriptionId = useId()
-  const firstActionRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const previousFocus = document.activeElement as HTMLElement | null
-    const frame = window.requestAnimationFrame(() => firstActionRef.current?.focus())
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose()
-    }
-    document.addEventListener("keydown", onKeyDown)
-    return () => {
-      window.cancelAnimationFrame(frame)
-      document.removeEventListener("keydown", onKeyDown)
-      previousFocus?.focus()
-    }
-  }, [open, onClose])
-
-  useEffect(() => {
-    if (!open) return
-    return registerBackHandler(onClose)
-  }, [open, onClose, registerBackHandler])
-
-  if (!open) return null
+  const safeAction = actions.findIndex((action) => action.variant !== "danger")
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/42 px-6 animate-in fade-in"
-      onClick={(event) => {
-        event.stopPropagation()
-        onClose()
-      }}
-    >
+    <Modal open={open} onClose={onClose} labelledBy={titleId} describedBy={description ? descriptionId : undefined} className="confirm-modal">
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? descriptionId : undefined}
         className="ui-material-in w-full max-w-xs overflow-hidden rounded-xl border border-border bg-card p-6 text-center shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
@@ -76,7 +43,7 @@ export function ConfirmDialog({
           {actions.map((a, index) => (
             <button
               key={a.label}
-              ref={index === 0 ? firstActionRef : undefined}
+              autoFocus={index === safeAction}
               type="button"
               onClick={a.onClick}
               className={cn(
@@ -91,6 +58,6 @@ export function ConfirmDialog({
           ))}
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

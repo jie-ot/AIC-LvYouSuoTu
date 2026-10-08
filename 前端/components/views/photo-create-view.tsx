@@ -1,4 +1,7 @@
 "use client";
+
+import { useNavigationGuard } from "@/lib/use-navigation-guard";
+import { newRequestId } from "@/lib/request-id";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
@@ -13,7 +16,7 @@ import {
 } from "lucide-react";
 import { useApp } from "@/components/shared/app-context";
 import { TopBar } from "@/components/shared/top-bar";
-import { ProgressLoader } from "@/components/shared/progress-loader";
+import { GenerationProgress } from "@/components/shared/generation-progress";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import type { GenerateResult } from "@/lib/api";
 import { shortId } from "@/lib/asset";
@@ -104,6 +107,12 @@ export function PhotoCreateView() {
         ? "返回明信片"
         : "返回我的旅行";
   const fileInput = useRef<HTMLInputElement>(null);
+  const pendingNavigation = useRef<(() => void) | null>(null);
+  useNavigationGuard(generating || (!created && Boolean(photos.length || requirements.trim() || memoryRequirements.trim())), (proceed) => {
+    if (generating) { toast("正在生成，请稍候", "info"); return; }
+    pendingNavigation.current = proceed;
+    setLeaveOpen(true);
+  });
   const livePhotos = useRef<PickedPhoto[]>([]);
   useEffect(() => {
     livePhotos.current = photos;
@@ -114,6 +123,7 @@ export function PhotoCreateView() {
     [],
   );
   const back = () => {
+    pendingNavigation.current = null;
     if (generating) {
       toast("正在生成，请稍候", "info");
       return;
@@ -200,7 +210,7 @@ export function PhotoCreateView() {
     });
     const matchingIdentity = requestIdentity?.signature === signature ? requestIdentity : null;
     const sameRequest = matchingIdentity !== null;
-    const requestId = matchingIdentity?.clientRequestId ?? crypto.randomUUID();
+    const requestId = matchingIdentity?.clientRequestId ?? newRequestId();
     if (!sameRequest) {
       setRequestIdentity({ signature, clientRequestId: requestId });
       setReplayMemoryOnly(false);
@@ -542,7 +552,7 @@ export function PhotoCreateView() {
             rows={3}
           />
         </label>
-        <p className="memory-observation-note">生成后会记录照片中的地点和场景，作为待你确认的旅行线索；可在旅行记忆页清除。</p>
+        <p className="memory-observation-note">会从照片中自动整理旅行线索，供下次规划参考；可在旅行记忆页修改或清除。</p>
         <label className="memory-consent">
           <input
             type="checkbox"
@@ -565,21 +575,9 @@ export function PhotoCreateView() {
             rows={2}
           />
         </label> : null}
-        {generating && (
-          <div className="generation-state" aria-live="polite">
-            <ProgressLoader
-              label={
-                generationProgress?.phase === "uploading"
-                  ? `上传照片 ${generationProgress.completed} / ${generationProgress.total}`
-                  : generationProgress?.phase === "preparing"
-                    ? "准备照片…"
-                    : "正在生成…"
-              }
-            />
-          </div>
-        )}
       </div>
       <footer className="create-footer">
+        {generating && generationProgress ? <GenerationProgress progress={generationProgress} /> :
         <button
           className="primary-action"
           onClick={() => void generate()}
@@ -601,15 +599,21 @@ export function PhotoCreateView() {
               <ImagePlus size={19} />
             ))}
         </button>
+        }
       </footer>
       <ConfirmDialog
         open={leaveOpen}
         title="离开上传页？"
         description="已选照片和输入内容将不会保留。"
-        onClose={() => setLeaveOpen(false)}
+        onClose={() => { pendingNavigation.current = null; setLeaveOpen(false); }}
         actions={[
-          { label: "继续编辑", onClick: () => setLeaveOpen(false) },
-          { label: "离开", variant: "ghost", onClick: () => goBackTo(backHref) },
+          { label: "继续编辑", onClick: () => { pendingNavigation.current = null; setLeaveOpen(false); } },
+          { label: "离开", variant: "ghost", onClick: () => {
+            const proceed = pendingNavigation.current;
+            pendingNavigation.current = null;
+            setLeaveOpen(false);
+            if (proceed) proceed(); else goBackTo(backHref);
+          } },
         ]}
       />
     </div>

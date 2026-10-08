@@ -84,11 +84,11 @@ export function ReportDetailView() {
   const accent = view ? pickAccent(view.palette, profile?.visualTheme) : "#6e6a62"
   const style = themeStyle(accent, view?.palette ?? [])
 
-  const startPlanning = (prompt: string, destination: string) => {
+  const startPlanning = (destination: string) => {
     beginNewPlan(null)
     startPlanningFromSeed({
-      text: prompt,
-      sourceLabel: `旅格锦囊「${destination}」`,
+      text: `我想去${destination}，请帮我安排下一次旅行。`,
+      sourceLabel: `旅行报告推荐 · ${destination}`,
       returnHref: `/reports/detail?reportId=${encodeURIComponent(report.id)}`,
     })
     navigate({ page: "planning" })
@@ -144,7 +144,7 @@ export function ReportDetailView() {
 function PersonaReport({ report, view, onPlan }: {
   report: Report
   view: PersonaView
-  onPlan: (prompt: string, destination: string) => void
+  onPlan: (destination: string) => void
 }) {
   const cover = resolveAssetUrl(view.frame?.imageUrl || report.coverImage) || PLACEHOLDER_IMAGE
   const sourceImages = unique(report.sourceImages ?? []).filter((image) => image !== view.frame?.imageUrl)
@@ -229,8 +229,8 @@ function PersonaReport({ report, view, onPlan }: {
             <h3>{stop.destination}</h3>
             <strong>{stop.title}</strong>
             <p>{stop.reason}</p>
-            {stop.planningPrompt ? <button type="button" onClick={() => onPlan(stop.planningPrompt, stop.destination)}>
-              按这个旅格规划 <ArrowUpRight className="size-4" aria-hidden />
+            {stop.destination ? <button type="button" onClick={() => onPlan(stop.destination)}>
+              规划去这里 <ArrowUpRight className="size-4" aria-hidden />
             </button> : null}
           </article>)}
         </div>
@@ -399,7 +399,8 @@ function themeStyle(accent: string, palette: PaletteColor[]): ThemeStyle {
 
 async function renderPoster(report: Report, view: PersonaView, accent: string): Promise<Blob> {
   const width = 1080
-  const height = 1920
+  // Keep the palette labels above the footer, including two-line stat captions.
+  const height = 2160
   const canvas = document.createElement("canvas")
   canvas.width = width
   canvas.height = height

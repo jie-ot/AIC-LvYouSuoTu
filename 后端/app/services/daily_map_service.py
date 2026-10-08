@@ -207,7 +207,7 @@ def _candidate_groups(
         fact = fact_for_schedule(schedule, facts)
         kind = classify_schedule(schedule, fact)
         city = _point_city(schedule, fact, overnight_city, data.trip_info.destination)
-        candidate = _map_candidate(schedule, kind=kind, city=city)
+        candidate = _map_candidate(schedule, kind=kind, city=city, fact=fact)
         if candidate is None:
             continue
         if candidate.kind == "hotel":
@@ -235,7 +235,9 @@ def _candidate_groups(
     def add(candidate: _Candidate | None) -> None:
         if candidate is None:
             return
-        key = (candidate.location, candidate.name)
+        # Labels may be abbreviated for the same hotel/attraction. One physical
+        # location of one kind gets one marker, regardless of the display name.
+        key = (candidate.location, candidate.kind)
         if key in seen:
             return
         seen.add(key)
@@ -271,10 +273,11 @@ def _map_candidate(
     *,
     kind: str,
     city: str,
+    fact: dict[str, Any] | None = None,
 ) -> _Candidate | None:
     if kind not in {"hotel", "attraction"}:
         return None
-    location = _trusted_coord(schedule)
+    location = _trusted_coord(schedule, fact)
     if location is None:
         return None
     name = " ".join(
@@ -292,10 +295,17 @@ def _map_candidate(
     )
 
 
-def _trusted_coord(schedule: Schedule) -> str | None:
+def _trusted_coord(schedule: Schedule, fact: dict[str, Any] | None = None) -> str | None:
+    # An unconfirmed train makes arrival time uncertain, not the cited hotel's
+    # location. Keep independently verified places on the map.
+    verified_place = bool(
+        fact and fact.get("tool") in _POI_BIND_TOOLS
+        and (fact.get("status") == "ok" or (fact.get("result_context") or {}).get("status") == "ok")
+        and _fact_map_coord(fact) == amap_provider.normalize_coord(schedule.location or "")
+    )
     if (
         not schedule.location
-        or schedule.fact_status != "verified"
+        or (schedule.fact_status != "verified" and not verified_place)
         or not schedule.fact_refs
         or not amap_provider.looks_like_coord(schedule.location)
     ):

@@ -53,6 +53,7 @@ _ROUTE_PATHS = {
     "transit": _TRANSIT_PATH,
 }
 _AMAP_NEXT_REQUEST_AT: dict[str, float] = defaultdict(float)
+_AMAP_SERVICE_INTERVAL: dict[str, float] = defaultdict(float)
 _AMAP_RATE_LOCK = threading.Lock()
 _AMAP_QUOTA_LOCK = threading.Lock()
 _AMAP_QUOTA_PAUSE_UNTIL = 0.0
@@ -147,6 +148,11 @@ def _get(path: str, params: dict) -> dict | None:
                 resp = client.get(url, params=query)
             if resp.status_code != 200:
                 logger.warning("amap %s http %d", path, resp.status_code)
+                if resp.status_code == 429:
+                    _backoff_service(path)
+                    if attempt + 1 < attempts:
+                        continue
+                    return None
                 if resp.status_code == 429 or resp.status_code >= 500:
                     if attempt + 1 < attempts:
                         time.sleep(min(0.5, 0.2 * (attempt + 1)))
@@ -161,8 +167,13 @@ def _get(path: str, params: dict) -> dict | None:
                     data.get("status"),
                     data.get("info"),
                 )
-                if "CUQPS_HAS_EXCEEDED_THE_LIMIT" in info:
+                if "DAILY_QUERY_OVER_LIMIT" in info:
                     _pause_after_quota_error()
+                    return None
+                if "QPS" in info or "TOO_FREQUENT" in info:
+                    _backoff_service(path)
+                    if attempt + 1 < attempts:
+                        continue
                     return None
                 if any(
                     marker in info
@@ -213,8 +224,13 @@ def static_map_image(params: dict[str, str | int]) -> bytes | None:
                     info = str(resp.json().get("info") or "").upper()
                 except (ValueError, AttributeError):
                     info = ""
-                if "CUQPS_HAS_EXCEEDED_THE_LIMIT" in info:
+                if "DAILY_QUERY_OVER_LIMIT" in info:
                     _pause_after_quota_error()
+                    return None
+                if "QPS" in info or "TOO_FREQUENT" in info:
+                    _backoff_service(_STATIC_MAP_PATH)
+                    if attempt + 1 < attempts:
+                        continue
                     return None
             logger.warning(
                 "amap %s invalid response http=%d content_type=%s",
@@ -225,6 +241,9 @@ def static_map_image(params: dict[str, str | int]) -> bytes | None:
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt + 1 >= attempts:
                 return None
+            if resp.status_code == 429:
+                _backoff_service(_STATIC_MAP_PATH)
+                continue
             time.sleep(min(0.5, 0.2 * (attempt + 1)))
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             logger.warning(
@@ -242,21 +261,31 @@ def static_map_image(params: dict[str, str | int]) -> bytes | None:
     return None
 
 
-def _throttle_amap_qps(_service_key: str) -> None:
-    """Keep the API key within its observed aggregate 3 QPS allowance."""
-    # Quota errors are reported for the key as a whole. Per-path buckets allowed
-    # weather, POI and route calls to exceed that aggregate even while every
-    # individual endpoint stayed below 3 QPS.
+def _backoff_service(service_key: str) -> None:
+    """10021 is a per-service QPS limit, not exhaustion of the whole provider."""
+    with _AMAP_RATE_LOCK:
+        interval = min(5.0, max(1.1, _AMAP_SERVICE_INTERVAL[service_key] * 2))
+        _AMAP_SERVICE_INTERVAL[service_key] = interval
+        _AMAP_NEXT_REQUEST_AT[service_key] = max(
+            _AMAP_NEXT_REQUEST_AT[service_key], time.monotonic() + interval,
+        )
+
+
+def _throttle_amap_qps(service_key: str) -> None:
+    """Honor the configured aggregate ceiling and learned endpoint limits."""
     max_qps = min(3, max(1, int(getattr(settings, "AMAP_MAX_QPS", 3) or 3)))
     min_interval = 1.0 / max_qps
-    service_key = "global"
-    with _AMAP_RATE_LOCK:
-        now = time.monotonic()
-        scheduled_at = max(now, _AMAP_NEXT_REQUEST_AT[service_key])
-        _AMAP_NEXT_REQUEST_AT[service_key] = scheduled_at + min_interval
-    wait_seconds = scheduled_at - now
-    if wait_seconds > 0:
-        time.sleep(wait_seconds)
+    while True:
+        with _AMAP_RATE_LOCK:
+            now = time.monotonic()
+            scheduled_at = max(_AMAP_NEXT_REQUEST_AT["global"], _AMAP_NEXT_REQUEST_AT[service_key])
+            if now >= scheduled_at:
+                _AMAP_NEXT_REQUEST_AT["global"] = now + min_interval
+                _AMAP_NEXT_REQUEST_AT[service_key] = now + max(min_interval, _AMAP_SERVICE_INTERVAL[service_key])
+                return
+        # Recheck after sleeping: another request may have discovered a lower
+        # service limit while this worker waited. No stale reserved slot leaks.
+        time.sleep(max(.001, scheduled_at - now))
 
 
 def weather(city: str, date: str) -> WeatherFact:

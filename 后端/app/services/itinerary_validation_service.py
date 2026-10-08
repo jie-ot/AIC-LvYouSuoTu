@@ -100,6 +100,8 @@ def validate_itinerary(data: ItineraryData) -> None:
             raise InvalidParamError(f"每日行程日期格式不合法：{day.date}")
         if day_date < start or day_date > end:
             raise InvalidParamError(f"每日行程日期 {day.date} 超出行程起止范围")
+        if prev_day is None and day_date != start:
+            raise InvalidParamError("每日行程必须从出发日期开始，不得缺少首日安排")
         if prev_day is not None and day_date <= prev_day:
             raise InvalidParamError("每日行程日期必须严格递增且连续")
         if prev_day is not None and day_date != prev_day + timedelta(days=1):
@@ -134,3 +136,6 @@ def validate_itinerary(data: ItineraryData) -> None:
                 last_minutes = start_m
             if end_timeline is not None:
                 last_end_minutes = end_timeline
+
+    if prev_day != end:
+        raise InvalidParamError("每日行程必须覆盖结束日期，不得缺少末日安排")

@@ -61,23 +61,35 @@ ipconfig getifaddr "$(route -n get default | awk '/interface:/{print $2}')"
 在前端项目根目录执行：
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm build
-pnpm start --hostname 0.0.0.0
+pnpm start
 ```
 
-看到 `Ready` 后保持终端运行。修改 `.env.local` 或前端代码后，先按 `Ctrl+C` 停止服务，再重新执行 `pnpm build` 和 `pnpm start --hostname 0.0.0.0`。
+看到本地访问地址后保持终端运行。修改 `.env.local` 或前端代码后，先按 `Ctrl+C` 停止服务，再重新执行 `pnpm build` 和 `pnpm start`。
+
+本项目使用 `output: "export"`，构建产物位于 `out/`；`pnpm start` 使用静态服务器提供这些文件。它与 Capacitor 共用同一份产物。开发时直接运行 `pnpm dev`，无需每次修改都重新构建。静态部署需要把 `/planning` 等路径解析到对应的 `.html` 文件；不要把所有路径统一返回首页。
+
+请使用完整的 `pnpm build`：构建后会检查 Next.js 16 在 Windows 上的 RSC 预加载路径，为受影响的文本载荷补齐对应文件名，避免静态部署与 App WebView 的预加载 404。原文件保留，已正确导出的版本无需额外处理。运行 `pnpm test` 可验证这一兼容处理和请求边界。
 
 ## 4. 访问前端
 
 - 电脑访问：`http://localhost:3000`
 - 手机访问：`http://电脑局域网IPv4:3000`
 
+手机保留底部导航和纵向操作流程，电脑使用原有较宽的页面框架与侧边导航，两端共用账户和数据。照片创作与行程调整继续采用原有页面结构。
+
+照片生成和旅行规划会显示实际步骤、已用时间及预计剩余时间。预估会受照片数量、模型和外部查询速度影响；暂时无法取得进度时会提示重新连接，生成请求会继续执行。
+
 手机访问还需要确认后端使用 `--host 0.0.0.0` 启动，并允许电脑防火墙通过 `3000` 和 `8000` 端口。
+
+还需在后端 `.env` 的 `FRONTEND_ORIGINS` 中加入实际网页来源（协议、IP 和端口），例如 `http://localhost:3000,http://192.168.10.222:3000`，然后重启后端。只修改前端 API 地址仍可能被浏览器的 CORS 检查拦截。
 
 ## 5. Android 配置
 
 Android 图标源文件为 `design/lvyousuotu-app-icon.png`。`capacitor.config.json` 中的 `plugins.CapacitorHttp.enabled` 应保持为 `true`，以便 Android 使用原生 HTTP 请求；如果后端通过 HTTP 提供图片，`server.androidScheme` 也应与实际部署协议保持一致。
+
+重新打包前先执行 `pnpm build`，再运行 `pnpm exec cap sync android`，将最新的手机界面和静态资源同步到原 Android 工程，然后按原签名配置构建 APK。
 
 ## 6. 常见问题
 

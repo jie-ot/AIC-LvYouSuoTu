@@ -20,7 +20,7 @@ CANVAS_BY_FORMAT = {
     "portrait_2_3": (1000, 1500),
 }
 CANVAS = CANVAS_BY_FORMAT["landscape_3_2"]
-PROMPT_VERSION = "postcard-v6"
+PROMPT_VERSION = "postcard-v13"
 
 
 @dataclass(frozen=True)

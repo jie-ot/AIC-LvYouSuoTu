@@ -642,13 +642,10 @@ def _planning_prompt(destination: str, profile: dto.TravelProfileData) -> str:
 
 
 def _prompt_text(destination: str, profile_hint: str, axes: list[dto.PersonaAxis]) -> str:
-    cues = "、".join(
-        f"偏爱{axis.right_label if axis.pole == axis.right_pole else axis.left_label}" for axis in axes
-    )
-    return (
-        f"我想去{destination}。我上一程的旅格是{profile_hint}：{cues}。"
-        "请先推荐一条适合我的路线方向，等我确认后再细化行程。"
-    )
+    # The planner retrieves travel memories itself. A destination shortcut must
+    # not turn an entertaining persona label into a user-authored preference.
+    del profile_hint, axes
+    return f"我想去{destination}，请帮我安排下一次旅行。"
 
 
 # ---------------------------------------------------------------- helpers
