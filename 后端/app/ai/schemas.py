@@ -235,8 +235,9 @@ class ReportNextStopCopy(BaseModel):
 
 
 class ReportCopyResult(BaseModel):
-    """Editorial layer over the computed 旅格; every field is validated separately."""
+    """Photo-grounded persona and copy; measured report facts remain unchanged."""
 
+    persona_name: str = Field(min_length=3, max_length=10)
     journey_title: str = Field(min_length=3, max_length=14)
     tagline: str = Field(min_length=6, max_length=26)
     portrait: str = Field(min_length=24, max_length=90)

@@ -1,16 +1,15 @@
 """旅格引擎：把一次旅行的照片算成一份可分享、可比对的旅行人格。
 
-Four axes are measured from the trip itself — 景 (nature ↔ city), 行 (dwell ↔
-roam), 时 (morning ↔ night) and 观 (vista ↔ close-up). Their poles form a
-four-character code such as 山游晨远 that indexes one of 16 fixed archetypes, so
-two travellers' reports stay comparable. A numeric persona vector is stored with
-the report so a future matching feature can read it; that matching is not part
-of the report. The language model only rewrites copy on top of these results,
-and each of its fields is validated and replaced on its own if it fails.
+Four measured axes describe the photos' scenes, pace, time and viewing scale.
+The model creates a persona name from the actual photo group and measured
+facts. Names are free-form; the four-character code is only an axis summary.
+Each copy field is validated independently, and a report requires a valid
+model-generated persona name before it can be saved.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -20,7 +19,7 @@ from app.ai.schemas import ReportCopyResult, ReportDraftResult
 from app.models import dto
 from app.services.journey_features import NATURE_TAGS, URBAN_TAGS, JourneyFeatures, JourneyPhoto
 
-PROFILE_VERSION = 5
+PROFILE_VERSION = 6
 
 # id, dimension name, left code, right code, left word, right word.
 # Codes stay one character so the seal can read 城游夜远. The words on the
@@ -32,34 +31,6 @@ AXES: tuple[tuple[str, str, str, str, str, str], ...] = (
     ("lens", "观看尺度", "远", "近", "远景", "近物"),
 )
 
-
-@dataclass(frozen=True)
-class Archetype:
-    id: str
-    name: str
-    tagline: str
-    word: str
-    word_note: str
-
-
-ARCHETYPES: dict[str, Archetype] = {
-    "山游晨远": Archetype("dawn_ridge", "逐日巡山人", "天一亮就出发，把远山一座座收进取景框", "远", "越走越远，越看越阔"),
-    "山游晨近": Archetype("trail_gleaner", "山径拾光者", "走得很远，也肯为一朵花蹲下来", "拾", "路上的小东西都算数"),
-    "山游夜远": Archetype("star_drifter", "星野夜行客", "白天赶路，天黑以后才等来正片", "野", "天黑了，风景才开场"),
-    "山游夜近": Archetype("breeze_collector", "晚风拾趣人", "一路向野，入夜还要把细节拍够", "趣", "越晚越有意思"),
-    "山栖晨远": Archetype("mist_keeper", "晨雾守山人", "认准一座山，看它从雾里醒过来", "静", "一座山看够一个早晨"),
-    "山栖晨近": Archetype("field_notes", "草木笔记派", "不赶路，一草一木都记进相册", "细", "近处自有山河"),
-    "山栖夜远": Archetype("moon_waiter", "等月亮的人", "挑好一处风景，从黄昏守到夜深", "候", "好风景值得等"),
-    "山栖夜近": Archetype("lamp_lodger", "山居灯下客", "在山里住下，把夜晚过得很具体", "暖", "山夜有灯，人就安心"),
-    "城游晨远": Archetype("skyline_hunter", "天际线猎手", "一座座城赶早去，先把全景拿下", "阔", "城市要从高处读起"),
-    "城游晨近": Archetype("corner_sampler", "街角采样员", "换一座城，就重新采集一遍街角", "逛", "好玩的都在拐角"),
-    "城游夜远": Archetype("neon_navigator", "霓虹夜航员", "城市亮灯以后，才是你的出发时间", "亮", "灯一亮，城就醒了"),
-    "城游夜近": Archetype("night_forager", "夜巷寻味家", "夜越深，巷子越窄，镜头越近", "味", "城的滋味在夜里"),
-    "城栖晨远": Archetype("slow_reader", "一城慢读者", "一座城不急着翻页，从日出读到日落", "读", "一座城，慢慢看"),
-    "城栖晨近": Archetype("alley_lens", "巷口慢镜头", "守着一条巷子，拍出一整天的光影", "慢", "慢下来，细节就来了"),
-    "城栖夜远": Archetype("lantern_gazer", "灯火凭栏人", "守一处高点，看整座城慢慢亮起来", "望", "灯火是城市的签名"),
-    "城栖夜近": Archetype("night_archivist", "夜色收藏家", "把一座城的夜晚，一格格收好", "藏", "夜色值得收藏"),
-}
 
 _NEXT_POOL: dict[tuple[str, str], tuple[str, ...]] = {
     ("山", "游"): ("川西环线", "伊犁河谷", "甘南", "青海湖", "阿勒泰", "稻城亚丁"),
@@ -100,6 +71,7 @@ class ProfileHistory:
     previous_report_count: int
     motif_counts: dict[str, int]
     previous_codes: tuple[str, ...] = ()
+    previous_names: tuple[str, ...] = ()
 
 
 def build_history_snapshot(
@@ -111,6 +83,7 @@ def build_history_snapshot(
     """Collect earlier persona codes and scene motifs, oldest first."""
     motifs: Counter[str] = Counter()
     codes: list[str] = []
+    names: list[str] = []
     report_count = 0
     seen_trips: set[str] = set()
     for index, payload in enumerate(profile_payloads):
@@ -123,13 +96,16 @@ def build_history_snapshot(
             seen_trips.add(trip_id)
         report_count += 1
         code = str(payload.get("personaCode") or payload.get("persona_code") or "")
-        if code in ARCHETYPES:
+        if re.fullmatch(r"[山城][栖游][晨夜][远近]", code):
             codes.append(code)
+        name = str(payload.get("archetypeName") or payload.get("archetype_name") or "").strip()
+        if name and name not in names:
+            names.append(name)
         signature = payload.get("sceneSignature") or payload.get("scene_signature")
         tokens = signature.get("tokens") if isinstance(signature, dict) else payload.get("keywords")
         if isinstance(tokens, list):
             motifs.update(str(token).strip() for token in set(tokens) if str(token).strip())
-    return ProfileHistory(report_count, dict(motifs), tuple(codes))
+    return ProfileHistory(report_count, dict(motifs), tuple(codes), tuple(names[-12:]))
 
 
 def build_profile(
@@ -139,15 +115,14 @@ def build_profile(
     image_url_by_asset: dict[str, str] | None = None,
     history: ProfileHistory | None = None,
 ) -> ReportDraftResult:
-    """Compute the whole 旅格 with deterministic copy that is already publishable."""
+    """Prepare measured facts and safe copy before the model names the portrait."""
     urls = image_url_by_asset or {}
     history = history or ProfileHistory(0, {})
     axes = _axes(features)
     code = "".join(axis.pole for axis in axes)
-    archetype = ARCHETYPES[code]
     stats = _stats(features, urls)
     frame = _signature_frame(features, axes, {stat.asset_id for stat in stats if stat.asset_id}, urls)
-    next_stops = _fallback_next_stops(features, axes, archetype, code, requirements)
+    next_stops = _fallback_next_stops(features, axes, code, requirements)
     tokens = _scene_tokens(features)
     portrait = _fallback_portrait(features)
     journey = dto.JourneyMeta(
@@ -162,16 +137,16 @@ def build_profile(
     )
     evolution_from = history.previous_codes[-1] if history.previous_codes else None
     profile = dto.TravelProfileData(
-        archetype_id=archetype.id,
-        archetype_name=archetype.name,
+        archetype_id="photo_portrait_pending",
+        archetype_name="旅行画像",
         persona_code=code,
-        slogan=archetype.tagline,
+        slogan=_fallback_journey_title(features, tokens),
         summary=portrait,
         spectrums=[],
         keywords=tokens[:3],
         modules=[dto.ProfileModule(title="旅格侧写", content=portrait)],
         next_trip_inspiration=next_stops[0].reason,
-        souvenir_line=archetype.word_note,
+        souvenir_line="沿着照片回看这一程",
         visual_theme=_visual_theme(axes, features),
         sample_quality="high" if features.photo_count >= 10 else "medium",
         confidence=round(sum(axis.confidence for axis in axes) / len(axes), 2),
@@ -196,8 +171,8 @@ def build_profile(
         new_facets=[token for token in tokens if not history.motif_counts.get(token)][:3],
         journey=journey,
         axes=axes,
-        trip_word=archetype.word,
-        trip_word_note=archetype.word_note,
+        trip_word="览",
+        trip_word_note="沿着照片回看这一程",
         stats=stats,
         palette=features.palette.colors,
         signature_frame=frame,
@@ -209,14 +184,17 @@ def build_profile(
         location=features.destination or "未知目的地",
         start_date=features.start_date.isoformat() if features.start_date else None,
         end_date=features.end_date.isoformat() if features.end_date else None,
-        personality_summary=archetype.name,
+        personality_summary=profile.archetype_name,
         content=_plain_content(profile),
         chart_data=_chart(features),
         profile_data=profile,
     )
 
 
-def copy_brief(draft: ReportDraftResult, features: JourneyFeatures) -> dict:
+def copy_brief(
+    draft: ReportDraftResult, features: JourneyFeatures,
+    *, previous_names: tuple[str, ...] = (),
+) -> dict:
     """Everything the copy editor may rely on — computed facts only."""
     profile = draft.profile_data
     journey = profile.journey
@@ -245,8 +223,6 @@ def copy_brief(draft: ReportDraftResult, features: JourneyFeatures) -> dict:
         },
         "persona": {
             "code": profile.persona_code,
-            "name": profile.archetype_name,
-            "default_tagline": profile.slogan,
             "axes": [
                 {
                     "axis": axis.name,
@@ -272,6 +248,7 @@ def copy_brief(draft: ReportDraftResult, features: JourneyFeatures) -> dict:
         "palette": [f"{color.name} {color.share}%" for color in profile.palette],
         "visited_places": sorted(features.visited_names()),
         "photos": photos,
+        "previous_persona_names": list(previous_names),
     }
 
 
@@ -279,6 +256,7 @@ def copy_issues(copy: ReportCopyResult, features: JourneyFeatures, stat_ids: set
     """Return field → reason for every model field that must not be published."""
     issues: dict[str, str] = {}
     texts = {
+        "persona_name": copy.persona_name,
         "journey_title": copy.journey_title,
         "tagline": copy.tagline,
         "portrait": copy.portrait,
@@ -323,6 +301,10 @@ def apply_creative_copy(
         return field not in rejected
 
     update: dict = {}
+    if accepted("persona_name"):
+        name = copy.persona_name.strip()
+        update["archetype_name"] = name
+        update["archetype_id"] = "photo_persona_" + hashlib.sha256(name.encode()).hexdigest()[:12]
     if accepted("tagline"):
         update["slogan"] = copy.tagline.strip()
     if accepted("portrait"):
@@ -361,7 +343,10 @@ def apply_creative_copy(
         ]
         update["next_trip_inspiration"] = stops[0].reason
     updated = profile.model_copy(update=update)
-    return draft.model_copy(update={"content": _plain_content(updated), "profile_data": updated})
+    return draft.model_copy(update={
+        "content": _plain_content(updated), "profile_data": updated,
+        "personality_summary": updated.archetype_name,
+    })
 
 
 def signature_asset_id(draft: ReportDraftResult) -> str | None:
@@ -599,7 +584,6 @@ def _fallback_portrait(features: JourneyFeatures) -> str:
 def _fallback_next_stops(
     features: JourneyFeatures,
     axes: list[dto.PersonaAxis],
-    archetype: Archetype,
     code: str,
     requirements: str,
 ) -> list[dto.NextStop]:
@@ -618,7 +602,7 @@ def _fallback_next_stops(
 
     continue_destination = pick(_NEXT_POOL[(scene_pole, pace_pole)], set())
     contrast_destination = pick(_NEXT_POOL[(other_scene, pace_pole)], {continue_destination})
-    profile_hint = f"「{archetype.name}」（{code}）"
+    profile_hint = code
     return [
         dto.NextStop(
             kind="continue",

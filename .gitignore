@@ -112,3 +112,12 @@ Desktop.ini
 *.tmp
 *.temp
 ~$*
+
+# 录屏演示数据
+!/后端/data/lvyousuotu.db
+!/后端/static/uploads/
+!/后端/static/uploads/**
+!/后端/static/generated/
+!/后端/static/generated/**
+!/后端/static/images/
+!/后端/static/images/**

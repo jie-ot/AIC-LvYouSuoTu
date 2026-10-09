@@ -1142,6 +1142,7 @@ def draft_report_copy(
     brief: dict[str, Any],
     requirements: str,
     validate: Callable[[ReportCopyResult], dict[str, str]],
+    image_data_urls: list[str] | None = None,
 ) -> tuple[ReportCopyResult, dict[str, str]]:
     """Write the editorial layer over the computed 旅格.
 
@@ -1160,8 +1161,10 @@ def draft_report_copy(
                 task=ark_chat_client.TASK_REPORT_DRAFT,
                 system_prompt=system_prompt,
                 user_text=attempt_text,
+                image_data_urls=image_data_urls or [],
                 temperature=0.85 if attempt == 0 else 0.4,
                 max_completion_tokens=6000,
+                timeout_seconds=max(settings.ARK_TEXT_TIMEOUT_SECONDS, 240),
             )
         try:
             copy = output_parser.parse_model_json(raw, ReportCopyResult)

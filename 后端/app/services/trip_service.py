@@ -9,6 +9,9 @@ from sqlmodel import Session, select
 
 from app.core.exceptions import InvalidParamError, NotFoundError
 from app.models import dto
+from app.models.file_asset import FileAsset
+from app.models.file_asset_reference import FileAssetReference
+from app.models.generation_operation import GenerationOperation
 from app.models.base import utcnow
 from app.models.plan import Plan
 from app.models.postcard import Postcard
@@ -276,6 +279,40 @@ def update_trip(
     return dto.TripSummary.model_validate(detail.model_dump())
 
 
+def find_photo_trip(session: Session, user_id: str, asset_ids: list[str]) -> Trip | None:
+    """Reuse an owned trip when an existing work uses the exact same photos."""
+    assets = session.exec(select(FileAsset).where(
+        FileAsset.user_id == user_id, FileAsset.id.in_(set(asset_ids)),
+        FileAsset.status != "deleted",
+    )).all()
+    if not assets or len(assets) != len(set(asset_ids)):
+        return None
+    def photo_key(asset_id: str, checksum: str | None) -> str:
+        return f"checksum:{checksum}" if checksum else f"id:{asset_id}"
+    wanted = {photo_key(asset.id, asset.checksum) for asset in assets}
+    candidates: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for model, owner_type in ((Report, "report"), (PostcardGroup, "postcard_group")):
+        rows = session.exec(
+            select(model.trip_id, FileAssetReference.owner_id, FileAsset.id, FileAsset.checksum)
+            .join(FileAssetReference, FileAssetReference.owner_id == model.id)
+            .join(FileAsset, FileAsset.id == FileAssetReference.asset_id)
+            .where(model.user_id == user_id, model.trip_id.is_not(None),
+                   FileAssetReference.user_id == user_id,
+                   FileAssetReference.owner_type == owner_type,
+                   FileAssetReference.role == "source_photo",
+                   FileAsset.user_id == user_id, FileAsset.status != "deleted")
+        ).all()
+        for trip_id, owner_id, asset_id, checksum in rows:
+            candidates[(trip_id, owner_type, owner_id)].add(photo_key(asset_id, checksum))
+    matching = {key[0] for key, photos in candidates.items() if photos == wanted}
+    if not matching:
+        return None
+    return session.exec(
+        select(Trip).where(Trip.user_id == user_id, Trip.id.in_(matching))
+        .order_by(Trip.created_at.asc(), Trip.id.asc())
+    ).first()
+
+
 def delete_empty_trip(session: Session, user_id: str, trip_id: str) -> None:
     """Delete a trip container only after all of its content has been removed."""
     trip = require_owned(session, user_id, trip_id)
@@ -295,6 +332,15 @@ def delete_empty_trip(session: Session, user_id: str, trip_id: str) -> None:
     ))
     if has_content:
         raise InvalidParamError("请先删除这次旅行中的行程、明信片和报告")
+    active_operation = session.exec(
+        select(GenerationOperation.id).where(
+            GenerationOperation.user_id == user_id,
+            GenerationOperation.trip_id == trip_id,
+            GenerationOperation.status == "processing",
+        )
+    ).first()
+    if active_operation is not None:
+        raise InvalidParamError("这次旅行正在生成作品，请结束后再删除")
     # An empty container can still own a photo-observation snapshot. Withdraw
     # it and any confirmed pattern that cited it before removing the trip.
     if session.exec(select(UserMemory.id).where(UserMemory.user_id == user_id)).first() is not None:
@@ -309,6 +355,10 @@ def delete_empty_trip(session: Session, user_id: str, trip_id: str) -> None:
     session.exec(update(UserMemoryEvent).where(
         UserMemoryEvent.user_id == user_id,
         UserMemoryEvent.trip_id == trip_id,
+    ).values(trip_id=None))
+    session.exec(update(GenerationOperation).where(
+        GenerationOperation.user_id == user_id,
+        GenerationOperation.trip_id == trip_id,
     ).values(trip_id=None))
     session.delete(trip)
     session.flush()

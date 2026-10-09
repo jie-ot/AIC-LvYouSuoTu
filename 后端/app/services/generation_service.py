@@ -101,6 +101,13 @@ def _begin_operation(
     client_request_id = request.client_request_id or f"legacy-{uuid.uuid4().hex}"
     try:
         with session_scope() as session:
+            selected_trip = (
+                trip_service.require_owned(session, user_id, request.trip_id)
+                if request.trip_id
+                else trip_service.find_photo_trip(
+                    session, user_id, [photo.asset_id for photo in request.photos],
+                )
+            )
             existing = session.exec(
                 select(GenerationOperation).where(
                     GenerationOperation.user_id == user_id,
@@ -127,6 +134,7 @@ def _begin_operation(
                         )
                         .values(
                             status="processing",
+                            trip_id=selected_trip.id if selected_trip is not None else None,
                             postcard_status="skipped",
                             report_status="skipped",
                             memory_status="skipped",
@@ -142,6 +150,7 @@ def _begin_operation(
                 raise InvalidParamError("生成请求状态异常，请刷新后重试")
             operation = GenerationOperation(
                 id=id_service.new_generation_operation_id(), user_id=user_id,
+                trip_id=selected_trip.id if selected_trip is not None else None,
                 client_request_id=client_request_id, request_hash=request_hash,
                 status="processing",
             )
@@ -378,6 +387,10 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             _finalize_operation(operation_id, replay)
         return replay
 
+    with session_scope() as session:
+        operation = session.get(GenerationOperation, operation_id)
+        effective_trip_id = request.trip_id or (operation.trip_id if operation else None)
+
     source_asset_ids = [photo.asset_id for photo in request.photos]
     generated_temp_asset_ids: list[str] = []
     warnings: list[dto.GenerationWarning] = []
@@ -399,7 +412,7 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             profile_history = profile_engine.build_history_snapshot(
                 [report.profile_data for report in previous_reports],
                 trip_ids=[report.trip_id for report in previous_reports],
-                exclude_trip_id=request.trip_id,
+                exclude_trip_id=effective_trip_id,
             )
 
         with timed_stage("generate_place_resolution", photo_count=len(request.photos)):
@@ -481,9 +494,10 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
                 ))
             if options.generate_report and not report_photo_shortfall:
                 report_future = executor.submit(call_in_current_context(
-                    _draft_report_v5, analysis=analysis, requirements=request.requirements,
+                    _draft_report, analysis=analysis, requirements=request.requirements,
                     uploaded_photos=list(request.photos), places=trip_places,
                     image_url_by_asset=source_path_by_asset,
+                    data_url_by_asset=data_url_by_asset,
                     history=profile_history,
                     warnings=warnings, warnings_lock=warnings_lock,
                 ))
@@ -567,7 +581,7 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
         generation_progress.set_phase("saving")
         result = _persist_results(
             user_id=user_id, operation_id=operation_id, options=options,
-            requested_trip_id=request.trip_id,
+            requested_trip_id=effective_trip_id,
             location=location, date_label=date_label, start_date=analysis.start_date,
             end_date=analysis.end_date, source_asset_ids=useful_source_asset_ids,
             postcard_renders=postcard_renders, report_draft=report_draft,
@@ -976,11 +990,12 @@ def _jpeg_data_url(content: bytes) -> str:
 
 
 @generation_progress.report_branch
-def _draft_report_v5(
+def _draft_report(
     *, analysis: PhotoAnalysisResult, requirements: str,
     uploaded_photos: list[dto.UploadedPhoto],
     places: place_service.TripPlaces,
     image_url_by_asset: dict[str, str],
+    data_url_by_asset: dict[str, str],
     history: profile_engine.ProfileHistory,
     warnings: list[dto.GenerationWarning], warnings_lock: Lock,
 ) -> ReportDraftResult:
@@ -1000,20 +1015,17 @@ def _draft_report_v5(
     try:
         with _CREATIVE_MODEL_LOCK:
             copy, issues = orchestrator.draft_report_copy(
-                brief=profile_engine.copy_brief(base, features),
+                brief=profile_engine.copy_brief(base, features, previous_names=history.previous_names),
                 requirements=requirements,
                 validate=lambda candidate: profile_engine.copy_issues(candidate, features, stat_ids),
+                image_data_urls=[data_url_by_asset[photo.asset_id] for photo in features.photos
+                                 if photo.asset_id in data_url_by_asset],
             )
     except Exception as exc:  # noqa: BLE001
-        with warnings_lock:
-            warnings.append(_warning(
-                "REPORT_COPY_FALLBACK",
-                "旅格文案已使用本地编辑版本，照片计算出的旅格不受影响",
-                "report",
-                retryable=True,
-            ))
-        logger.warning("report copy fallback: %s", type(exc).__name__)
-        return base
+        logger.warning("report portrait generation failed: %s", type(exc).__name__)
+        raise AIGenerationError("旅行画像生成失败，请稍后重试") from exc
+    if "persona_name" in issues:
+        raise AIGenerationError("旅行画像名称未通过校验，请重试")
     if issues:
         log_event("report_copy_field_fallback", status="partial", fields=sorted(issues))
     return profile_engine.apply_creative_copy(base, copy, set(issues))
@@ -1038,7 +1050,7 @@ def _persist_results(
 ) -> dto.GenerateResult:
     group_dto: dto.PostcardGroup | None = None
     report_dto: dto.Report | None = None
-    created_trip = requested_trip_id is None
+    created_trip = False
     location_known = location not in {"未知目的地", "未知地点", ""}
     journey = report_draft.profile_data.journey if report_draft is not None else None
     # Artworks always carry a readable place line: the resolved destination, or
@@ -1053,7 +1065,11 @@ def _persist_results(
         trip = (
             trip_service.require_owned(session, user_id, requested_trip_id)
             if requested_trip_id
-            else trip_service.create_in_session(
+            else trip_service.find_photo_trip(session, user_id, source_asset_ids)
+        )
+        if trip is None:
+            created_trip = True
+            trip = trip_service.create_in_session(
                 session,
                 user_id=user_id,
                 title=(
@@ -1070,7 +1086,6 @@ def _persist_results(
                 # when that branch rolls back and the temporary asset is deleted.
                 cover_image=None,
             )
-        )
         trip_id = trip.id
     if postcard_renders and postcard_status == "success":
         try:
