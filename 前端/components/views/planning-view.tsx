@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useApp } from "@/components/shared/app-context";
 import { TopBar } from "@/components/shared/top-bar";
+import { CollectionHeader } from "@/components/shared/collection-header";
 import { ItineraryDetail } from "@/components/shared/itinerary-detail";
 import {
   PlanningConversation,
@@ -338,26 +339,39 @@ export function PlanningView() {
     ],
   );
 
+  const planningTools = (
+    <nav className="planning-header-tools" aria-label="规划工具">
+      <button
+        type="button"
+        aria-label="历史行程"
+        title="历史行程"
+        onClick={() => guardedLeave(() => leavePlanning(() => navigate({ page: "history" })))}
+      >
+        <History size={17} aria-hidden /><span>历史行程</span>
+      </button>
+      <Link href="/memory" aria-label="旅行记忆" title="旅行记忆"><Brain size={17} aria-hidden /><span>旅行记忆</span></Link>
+    </nav>
+  );
+
+  const headerActions = <div className="planning-header-actions">
+    {phase === "result" ? <div ref={setExportTarget} className="compact-export-slot" /> : null}
+    {planningTools}
+  </div>;
+
   return (
     <div className="app-page planning-page flex h-full min-h-0 flex-col">
-      <TopBar
+      {editingPlanId || requestedTripId || seedSource ? <TopBar
         title={editingPlanId ? "编辑行程" : "行程规划"}
         onBack={() => guardedLeave(() => leavePlanning(() => goBackTo(backHref)))}
         backLabel={requestedTripId ? "返回这次旅行" : editingPlanId ? "返回已保存行程" : "返回来源"}
         showUserBadge={false}
         showBack={Boolean(editingPlanId || requestedTripId || seedSource)}
-        right={phase === "result" ? <div ref={setExportTarget} className="compact-export-slot" /> : undefined}
-      />
-
-      <div className="planning-context-strip">
-        <button
-          type="button"
-          onClick={() => guardedLeave(() => leavePlanning(() => navigate({ page: "history" })))}
-        >
-          <History size={17} aria-hidden />历史行程
-        </button>
-        <Link href="/memory"><Brain size={17} aria-hidden />旅行记忆</Link>
-      </div>
+        right={headerActions}
+      /> : <CollectionHeader
+        section="规划"
+        title="行程规划"
+        action={headerActions}
+      />}
 
       {seedSource && phase === "conversation" ? (
         <div className="planning-seed-note" role="status">

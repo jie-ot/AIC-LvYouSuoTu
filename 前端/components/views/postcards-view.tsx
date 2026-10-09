@@ -7,6 +7,7 @@ import { BottomNav } from "@/components/shared/bottom-nav";
 import { ActionMenu } from "@/components/shared/action-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { EmptyState } from "@/components/shared/empty-state";
+import { CollectionHeader } from "@/components/shared/collection-header";
 import {
   PLACEHOLDER_IMAGE,
   handleImageError,
@@ -22,14 +23,13 @@ export function PostcardsView() {
     displayPlace(group.location, trips.find((trip) => trip.id === group.tripId)?.title);
   return (
     <div className="app-page archive-page">
-      <header className="collection-header">
-        <div className="brand-mark">旅有所图</div>
-        <div className="collection-title-row">
-          <h1>明信片</h1>
-          <Link href="/create?mode=postcard" className="primary-quiet-button"><Plus size={17} />制作</Link>
-        </div>
-        <p className="collection-count">{postcardGroups.reduce((n, g) => n + g.postcards.length, 0)} 张</p>
-      </header>
+      <CollectionHeader
+        section="明信片"
+        title="旅行明信片"
+        description="把喜欢的风景，寄给未来的自己。"
+        count={postcardGroups.length ? `${postcardGroups.reduce((n, g) => n + g.postcards.length, 0)} 张明信片` : undefined}
+        action={<Link href="/create?mode=postcard" className="primary-quiet-button"><Plus size={17} aria-hidden />制作明信片</Link>}
+      />
       <main className="archive-scroll">
         {postcardGroups.length ? (
           <div className="postcard-archive">
@@ -77,6 +77,7 @@ export function PostcardsView() {
           <EmptyState
             icon={<Images size={28} />}
             title="还没有明信片"
+            description="选几张旅行照片，让这一刻成为一张值得收藏的明信片。"
           >
             <Link href="/create?mode=postcard" className="primary-action">
               上传照片

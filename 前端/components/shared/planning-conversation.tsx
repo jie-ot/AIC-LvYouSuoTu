@@ -6,6 +6,7 @@ import {
   Check,
   CircleAlert,
   Send,
+  Route,
   WandSparkles,
 } from "lucide-react";
 import type {
@@ -44,6 +45,7 @@ export function PlanningConversation({
   onSend,
   onConfirm,
 }: PlanningConversationProps) {
+  const starting = messages.length === 1 && phase === "collecting" && !busy;
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -56,13 +58,14 @@ export function PlanningConversation({
       });
   }, [busy, messages, phase]);
   return (
-    <div className="planning-chat" data-testid="planning-conversation">
+    <div className="planning-chat" data-testid="planning-conversation" data-state={starting ? "welcome" : "conversation"}>
       <div className="planning-chat-scroll">
         <header className="planning-intro">
           <ol aria-label="规划步骤">
             {["填写需求", "确认信息", "生成行程"].map((label, index) => (
               <li
                 key={label}
+                aria-current={index === (phase === "confirming" ? 1 : 0) ? "step" : undefined}
                 className={
                   index === (phase === "confirming" ? 1 : 0) ? "is-active" : ""
                 }
@@ -73,7 +76,28 @@ export function PlanningConversation({
             ))}
           </ol>
         </header>
-        <div className="chat-messages" aria-live="polite">
+        {starting ? (
+          <section className="planning-welcome" aria-label="开始规划旅行">
+            <div className="planning-welcome-mark"><Route size={25} strokeWidth={1.5} aria-hidden /></div>
+            <h2>下一程，想去哪里？</h2>
+            <p>目的地、天数、同行人，<br />想到什么都可以说。</p>
+            <div className="planning-starters" aria-label="旅行想法示例">
+              {[
+                ["杭州小旅行", "10 月去杭州，3 天，两个人"],
+                ["带长辈出游", "带长辈去北京，尽量少走路"],
+                ["高铁轻出发", "从武汉出发，高铁优先，预算 3000 元"],
+                ["周末看展", "周末去上海，想看展览和逛街区"],
+              ].map(([label, text]) => (
+                <button key={label} type="button" title={text} onClick={() => {
+                  onChange(text);
+                  inputRef.current?.focus();
+                }}>
+                  {label}<ArrowUpRight size={13} aria-hidden />
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : <div className="chat-messages" aria-live="polite">
           {messages.map((message) => (
             <div key={message.id} className={`chat-message is-${message.role}`}>
               {message.role === "assistant" && (
@@ -92,28 +116,7 @@ export function PlanningConversation({
               <span>正在整理</span>
             </div>
           )}
-        </div>
-        {messages.length === 1 && (
-          <div className="planning-starters">
-            {[
-              "10 月去杭州，3 天，两个人",
-              "带长辈去北京，尽量少走路",
-              "从武汉出发，高铁优先，预算 3000 元",
-              "周末去上海，想看展览和逛街区",
-            ].map((text) => (
-              <button
-                key={text}
-                onClick={() => {
-                  onChange(text);
-                  inputRef.current?.focus();
-                }}
-              >
-                {text}
-                <ArrowUpRight size={14} />
-              </button>
-            ))}
-          </div>
-        )}
+        </div>}
         {phase === "confirming" && checklist.length > 0 && (
           <section
             className="planning-checklist"
@@ -142,27 +145,29 @@ export function PlanningConversation({
                 </div>
               ))}
             </dl>
-            <button
-              className="primary-action"
-              onClick={onConfirm}
-              disabled={busy || !confirmationReady}
-              data-testid="confirm-and-generate"
-            >
-              {confirmationReady ? "确认，生成行程" : "正在更新清单"}
-              <ArrowUpRight size={18} />
-            </button>
-            <button
-              className="checklist-edit"
-              onClick={() => inputRef.current?.focus()}
-            >
-              继续补充
-            </button>
+            <div className="planning-checklist-actions">
+              <button
+                className="primary-action"
+                onClick={onConfirm}
+                disabled={busy || !confirmationReady}
+                data-testid="confirm-and-generate"
+              >
+                {confirmationReady ? "确认，生成行程" : "正在更新清单"}
+                <ArrowUpRight size={18} />
+              </button>
+              <button
+                className="checklist-edit"
+                onClick={() => inputRef.current?.focus()}
+              >
+                继续补充
+              </button>
+            </div>
           </section>
         )}
         <div ref={bottomRef} />
       </div>
       <footer className="chat-composer">
-        <div>
+        <div className="planning-input-box">
           <textarea
             ref={inputRef}
             value={value}
@@ -181,7 +186,7 @@ export function PlanningConversation({
             placeholder={
               phase === "confirming"
                 ? "还有什么想调整的？"
-                : "例如：10 月去杭州，3 天，两个人"
+                : "想去哪里？说说你的旅行想法…"
             }
             rows={2}
             aria-label="旅行需求"
@@ -197,6 +202,7 @@ export function PlanningConversation({
             <Send size={18} />
           </button>
         </div>
+        <p className="planning-input-hint">{phase === "confirming" ? "核对清单后，再确认生成行程。" : "先聊清需求，再确认生成。"}</p>
       </footer>
     </div>
   );

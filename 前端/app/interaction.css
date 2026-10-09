@@ -10,7 +10,7 @@
 .create-page .upload-zone { background: #fff; border-color: #d1d1d6; color: #1d1d1f; }
 .create-page .upload-photo-mark { color: var(--primary); }
 .create-page .upload-zone > strong { color: #1d1d1f; font-weight: 600; }
-.create-page .output-options > button[aria-pressed="true"] { background: #007aff0d; border-color: #007aff66; }
+.create-page .output-options > button[aria-pressed="true"] { background: var(--sage-soft); border-color: #b6c7a8; }
 .create-page .create-prompt textarea { font-family: var(--font-sans); }
 .task-progress { width: min(100%, 520px); margin: 0 auto; padding: 22px 24px; border: 1px solid rgba(60,60,67,.09); border-radius: 16px; background: var(--paper-raised, white); color: var(--ink); font-family: var(--font-sans); }
 .task-progress-heading { display: flex; align-items: center; gap: 10px; }

@@ -9,6 +9,7 @@ import './editorial.css'
 import './persona.css'
 import './discovery.css'
 import './interaction.css'
+import './journey.css'
 
 export const metadata: Metadata = {
   title: '旅有所图',
@@ -17,7 +18,7 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   colorScheme: 'light',
-  themeColor: '#f8f7f4',
+  themeColor: '#faf9f6',
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',

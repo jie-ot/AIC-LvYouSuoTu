@@ -97,8 +97,8 @@ export function DiscoveryView() {
       <div className="discovery-topics" role="group" aria-label="旅行主题">{["", ...DISCOVERY_TAGS].map((tag) => <button type="button" key={tag} aria-pressed={topic === tag} onClick={() => setTopic(tag)}>{tag || "全部"}</button>)}</div>
     </header>
     <main ref={scroll} className="discovery-scroll">
-      {feed && !query && mode === "recommended" ? <div className="discovery-intent"><Compass size={19} /><p>分享走过的路，发现想去的地方。
-        <span>{feed.demoCount ? "含 " + feed.demoCount + " 篇演示笔记 · 可发布自己的真实旅行" : "按你的旅行需求推荐"}</span></p></div> : null}
+      {feed && !query && mode === "recommended" ? <div className="discovery-intent"><Compass size={16} aria-hidden /><p>发现下一程的灵感</p>
+        <span>{feed.demoCount ? feed.demoCount + " 篇演示笔记" : "按你的旅行需求推荐"}</span></div> : null}
       {query ? <p className="discovery-result-label">“{query}”的搜索结果{!loading && feed ? " · " + feed.total + " 篇" : ""}</p> : null}
       {error ? <section className="discovery-empty" role="alert"><p>旅行笔记暂时没能加载</p><button className="discovery-secondary" onClick={() => setRevision((value) => value + 1)}>重新加载</button></section> :
         loading ? <div aria-label="正在加载笔记"><DiscoveryGrid>{Array.from({ length: 6 }, (_, index) => <div className="discovery-skeleton" key={index} />)}</DiscoveryGrid></div> :
