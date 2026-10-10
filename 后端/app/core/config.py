@@ -41,7 +41,12 @@ class Settings(BaseSettings):
     # —— Persistence ——
     DATABASE_URL: str = "sqlite:///./data/lvyousuotu.db"
 
-    # —— Auth / single-user demo ——
+    # —— Accounts (outside the shareable travel/demo database) ——
+    AUTH_DATABASE_URL: str = "sqlite:///./data/auth.db"
+    AUTH_SESSION_DAYS: int = 30
+    AUTH_DEMO_USERNAME: str = "demo"
+    AUTH_DEMO_PASSWORD: str = ""
+    AUTH_DEMO_LOGIN_ENABLED: bool = True
     DEFAULT_USER_ID: str = "demo_user_001"
     DISCOVERY_DEMO_ENABLED: bool = True
     DISCOVERY_SEMANTIC_ENABLED: bool = True

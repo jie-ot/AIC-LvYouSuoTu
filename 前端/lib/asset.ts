@@ -13,6 +13,8 @@
  * - 已是完整 http(s) URL 的（理论上不应出现）原样返回，避免二次拼接。
  */
 
+import { readSession } from "./auth-session"
+
 /** 图片加载失败时的占位资源。 */
 export const PLACEHOLDER_IMAGE = "/placeholder.svg"
 
@@ -36,7 +38,9 @@ export function resolveAssetUrl(relativePath: string | null | undefined): string
   // 真实后端资源：/static/... 用资源基址拼接
   const base = (process.env.NEXT_PUBLIC_ASSET_BASE_URL ?? "").replace(/\/$/, "")
   const normalized = relativePath.startsWith("/") ? relativePath : `/${relativePath}`
-  return `${base}${normalized}`
+  const mediaToken = normalized.startsWith("/static/") ? readSession()?.mediaToken : null
+  const access = mediaToken ? `${normalized.includes("?") ? "&" : "?"}media_token=${encodeURIComponent(mediaToken)}` : ""
+  return `${base}${normalized}${access}`
 }
 
 /**

@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-_current_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_current_token: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
     "planning_progress_token",
     default=None,
 )
@@ -112,7 +112,7 @@ class _Session:
         return int(((self.finished or time.monotonic()) - self.started) * 1000)
 
 
-_sessions: dict[str, _Session] = {}
+_sessions: dict[tuple[str, str], _Session] = {}
 _lock = threading.RLock()
 
 
@@ -134,6 +134,8 @@ def normalize_token(token: str | None) -> str | None:
 @contextmanager
 def progress_session(
     token: str | None,
+    *,
+    user_id: str = "",
     **fields: Any,
 ) -> Iterator[None]:
     """Track one planning request under a client-supplied token."""
@@ -141,10 +143,11 @@ def progress_session(
     if normalized is None:
         yield
         return
+    key = (user_id, normalized)
     with _lock:
-        _sessions[normalized] = _Session(token=normalized, **fields)
+        _sessions[key] = _Session(token=normalized, **fields)
         _evict_locked()
-    context_token = _current_token.set(normalized)
+    context_token = _current_token.set(key)
     try:
         yield
     except Exception as exc:
@@ -230,14 +233,14 @@ def fail(message: str) -> None:
         session.finished = session.updated
 
 
-def snapshot(token: str | None) -> dict[str, Any] | None:
+def snapshot(token: str | None, *, user_id: str = "") -> dict[str, Any] | None:
     """Public view for the polling endpoint."""
     normalized = normalize_token(token)
     if normalized is None:
         return None
     with _lock:
         _evict_locked()
-        session = _sessions.get(normalized)
+        session = _sessions.get((user_id, normalized))
         if session is None:
             return None
         return _snapshot_locked(session)

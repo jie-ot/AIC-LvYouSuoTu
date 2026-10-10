@@ -2,6 +2,7 @@
 import type { ReactNode } from "react";
 import { ChevronLeft } from "lucide-react";
 import { useApp } from "@/components/shared/app-context";
+import { AccountMenu } from "./account-menu";
 export function TopBar({
   title,
   subtitle,
@@ -39,7 +40,7 @@ export function TopBar({
           <h1>{title}</h1>
           {subtitle && <p>{subtitle}</p>}
         </div>
-        {showUserBadge ? <span className="top-bar-spacer" /> : null}
+        {showUserBadge ? <AccountMenu /> : null}
       </div>
       {right && <div className="top-bar-actions">{right}</div>}
     </header>

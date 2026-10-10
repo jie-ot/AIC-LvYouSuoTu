@@ -17,12 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 
 from app.api.api import api_router
 from app.core.config import settings
 from app.core.exceptions import BusinessError
+from app.core.private_static import PrivateStaticFiles
 from app.core.responses import (
     CODE_INTERNAL_ERROR,
     CODE_INVALID_PARAM,
@@ -37,7 +37,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run lightweight startup baseline checks (demo memory + default cover)."""
     from app.db.session import engine
     from app.services.bootstrap_service import ensure_demo_baseline
+    from app.services.account_service import ensure_accounts
 
+    ensure_accounts()
     with Session(engine) as session:
         ensure_demo_baseline(session)
         if settings.DISCOVERY_DEMO_ENABLED:
@@ -65,7 +67,7 @@ def create_app() -> FastAPI:
     # —— 静态资源挂载 ——
     static_root = os.path.abspath(settings.STATIC_ROOT)
     os.makedirs(static_root, exist_ok=True)
-    app.mount("/static", StaticFiles(directory=static_root), name="static")
+    app.mount("/static", PrivateStaticFiles(directory=static_root), name="static")
 
     # —— 全局异常处理器：统一标准响应体 ——
     _register_exception_handlers(app)
@@ -90,7 +92,11 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(BusinessError)
     async def _business_handler(request: Request, exc: BusinessError) -> JSONResponse:
-        return JSONResponse(status_code=200, content=error(exc.code, exc.message))
+        return JSONResponse(
+            status_code=getattr(exc, "status_code", 200),
+            content=error(exc.code, exc.message),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:

@@ -1,7 +1,7 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { AppFrame } from '@/components/shared/app-frame'
-import { AppProvider } from '@/components/shared/app-context'
+import { AuthGate, AuthProvider } from '@/components/shared/auth-context'
 import { MobileShell } from '@/components/shared/mobile-shell'
 import './globals.css'
 import './journal.css'
@@ -10,6 +10,7 @@ import './persona.css'
 import './discovery.css'
 import './interaction.css'
 import './journey.css'
+import './auth.css'
 
 export const metadata: Metadata = {
   title: '旅有所图',
@@ -32,11 +33,11 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className="bg-background" suppressHydrationWarning>
       <body className="font-sans antialiased" suppressHydrationWarning>
-        <AppProvider>
+        <AuthProvider>
           <MobileShell>
-            <AppFrame>{children}</AppFrame>
+            <AuthGate><AppFrame>{children}</AppFrame></AuthGate>
           </MobileShell>
-        </AppProvider>
+        </AuthProvider>
         {process.env.VERCEL === '1' && <Analytics />}
       </body>
     </html>

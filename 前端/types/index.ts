@@ -627,7 +627,7 @@ export interface Schedule {
 
 /* ---------------- 业务状态码（前端展示用，对齐 0.6） ---------------- */
 
-export type BusinessCode = 0 | 1001 | 1002 | 1003 | 1004
+export type BusinessCode = 0 | 1001 | 1002 | 1003 | 1004 | 1005 | 1006 | 1007
 
 /* ---------------- 前端页面目的地（映射到 Next.js App Router URL） ---------------- */
 

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from app.core.responses import (
     CODE_AI_FAILED,
+    CODE_AUTH_REQUIRED,
     CODE_INTERNAL_ERROR,
     CODE_INVALID_PARAM,
     CODE_NOT_FOUND,
+    CODE_RATE_LIMITED,
+    CODE_READ_ONLY,
 )
 
 
@@ -64,3 +67,18 @@ class NotFoundError(BusinessError):
     """Business main record not found → 1004."""
 
     code = CODE_NOT_FOUND
+
+
+class AuthenticationError(BusinessError):
+    code = CODE_AUTH_REQUIRED
+    status_code = 401
+
+
+class RateLimitError(BusinessError):
+    code = CODE_RATE_LIMITED
+    status_code = 429
+
+
+class ReadOnlyError(BusinessError):
+    code = CODE_READ_ONLY
+    status_code = 403

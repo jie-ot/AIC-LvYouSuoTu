@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlmodel import Session, select
 
 from app.core.exceptions import InvalidParamError, NotFoundError
+from app.core.config import settings
 from app.models.base import utcnow
 from app.models.discovery import DiscoveryFeedback, DiscoveryPost, DiscoveryPreference
 from app.models.file_asset import FileAsset
@@ -166,7 +167,10 @@ def as_note(row: DiscoveryPost) -> Note:
 def card(row: DiscoveryPost, user_id: str, action: DiscoveryFeedback | None = None) -> dict:
     return {
         "id": row.id, "title": row.title, "destination": row.destination,
-        "excerpt": row.body[:100], "author": row.author,
+        "excerpt": row.body[:100], "author": (
+            settings.AUTH_DEMO_USERNAME
+            if row.author == "我" and row.user_id == settings.DEFAULT_USER_ID else row.author
+        ),
         "cover": row.photos[0] if row.photos else None,
         "tags": row.tags, "isDemo": row.is_demo, "isOwn": row.user_id == user_id,
         "saved": bool(action and action.saved), "dismissed": bool(action and action.dismissed),
@@ -308,7 +312,7 @@ def share_options(session: Session, user_id: str, trip_id: str) -> dict:
     }
 
 
-def publish(session: Session, user_id: str, data: PostInput) -> dict:
+def publish(session: Session, user_id: str, data: PostInput, *, author: str = "旅行者") -> dict:
     existing = session.exec(select(DiscoveryPost).where(
         DiscoveryPost.user_id == user_id, DiscoveryPost.request_id == data.request_id,
     )).first()
@@ -344,7 +348,7 @@ def publish(session: Session, user_id: str, data: PostInput) -> dict:
         photos = [item["imageUrl"] for item in attachments["postcards"]]
     row = DiscoveryPost(
         id="note_" + uuid4().hex, user_id=user_id, trip_id=data.trip_id,
-        request_id=data.request_id, author="我", title=data.title, destination=data.destination,
+        request_id=data.request_id, author=author, title=data.title, destination=data.destination,
         body=data.body, recommendations=data.recommendations, pitfalls=data.pitfalls,
         tags=data.tags, photos=photos, attachments=attachments,
     )

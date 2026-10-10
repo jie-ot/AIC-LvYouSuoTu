@@ -5,12 +5,15 @@ import Link from "next/link"
 import { Bookmark, Compass, EyeOff, MapPin, Plus, Search, RotateCcw } from "lucide-react"
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
+import { useAuth } from "@/components/shared/auth-context"
+import { AccountMenu } from "@/components/shared/account-menu"
 import { DiscoveryGrid } from "@/components/discovery/shared"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 import { DISCOVERY_TAGS, discoveryFeedback, getDiscoveryFeed, recordDiscoverySearch, type Feed, type FeedMode } from "@/lib/discovery-api"
 
 export function DiscoveryView() {
   const { toast, toastError } = useApp()
+  const { user } = useAuth()
   const [feed, setFeed] = useState<Feed | null>(null)
   const [query, setQuery] = useState("")
   const [search, setSearch] = useState("")
@@ -61,7 +64,7 @@ export function DiscoveryView() {
   function submitSearch() {
     const value = search.trim()
     setQuery(value)
-    if (value) void recordDiscoverySearch(value).catch(() => {})
+    if (value && !user?.readOnly) void recordDiscoverySearch(value).catch(() => {})
   }
   async function loadMore() {
     if (feed?.nextOffset == null || more) return
@@ -85,7 +88,7 @@ export function DiscoveryView() {
   }
   return <div className="app-page discovery-page">
     <header className="discovery-header">
-      <div className="discovery-heading"><div><div className="brand-mark">旅有所图 / 发现</div><h1>旅行发现<span>下一程，从这里开始</span></h1></div>
+      <div className="discovery-heading"><div><div className="collection-brand-row"><div className="brand-mark">旅有所图 / 发现</div><AccountMenu /></div><h1>旅行发现<span>下一程，从这里开始</span></h1></div>
         <Link href="/discover/share" className="discovery-primary"><Plus size={18} /><span>分享旅行</span></Link></div>
       <div className="discovery-search-row"><form className="discovery-search" role="search" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
         <Search size={19} /><input aria-label="搜索旅行笔记" value={search} onChange={(event) => setSearch(event.target.value)} maxLength={100} placeholder="搜目的地、旅行方式、推荐与避雷" />

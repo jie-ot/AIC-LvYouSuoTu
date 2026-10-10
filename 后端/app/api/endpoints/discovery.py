@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlmodel import Session
 
-from app.core.dependencies import get_current_user_id
+from app.core.dependencies import get_current_account, get_current_user_id
 from app.core.responses import success
 from app.db.session import get_session
 from app.services.discovery import service
@@ -61,8 +61,9 @@ def assist(data: AssistInput, current_user_id: str = Depends(get_current_user_id
 def publish(
     data: PostInput, current_user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_session),
+    account: dict = Depends(get_current_account),
 ) -> dict:
-    result = service.publish(session, current_user_id, data)
+    result = service.publish(session, current_user_id, data, author=account["username"])
     session.commit()
     return success(result)
 

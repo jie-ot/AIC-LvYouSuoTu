@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { AccountMenu } from "./account-menu"
 
 export function CollectionHeader({
   section,
@@ -17,7 +18,7 @@ export function CollectionHeader({
     <header className="collection-header">
       <div className="collection-heading">
         <div>
-          <div className="brand-mark">旅有所图 / {section}</div>
+          <div className="collection-brand-row"><div className="brand-mark">旅有所图 / {section}</div><AccountMenu /></div>
           <h1>{title}</h1>
         </div>
         {action}

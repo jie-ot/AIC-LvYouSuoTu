@@ -11,6 +11,7 @@
  * 仅本文件做解包；业务 API 只描述「请求什么」，不再触碰 code/message/data。
  */
 import { AppError, type BusinessErrorCode } from "./errors"
+import { clearSession, readSession } from "./auth-session"
 
 interface ApiEnvelope<T> {
   code: number
@@ -18,7 +19,7 @@ interface ApiEnvelope<T> {
   data: T
 }
 
-const KNOWN_CODES: BusinessErrorCode[] = [1001, 1002, 1003, 1004]
+const KNOWN_CODES: BusinessErrorCode[] = [1001, 1002, 1003, 1004, 1005, 1006, 1007]
 const READ_TIMEOUT_MS = 20_000
 
 function normalizeCode(code: number): BusinessErrorCode {
@@ -66,15 +67,24 @@ export async function apiClient<T>(path: string, init?: RequestInit): Promise<T>
 }
 
 async function requestEnvelope<T>(path: string, init?: RequestInit): Promise<T> {
+  const session = readSession()
+  const isPublicAuth = /^\/auth\/(options|login|register|demo)$/.test(path)
+  const headers = new Headers(init?.headers)
+  if (session && !isPublicAuth) headers.set("Authorization", `Bearer ${session.token}`)
   let res: Response
   try {
-    res = await fetch(buildUrl(path), init)
+    res = await fetch(buildUrl(path), { ...init, headers, cache: "no-store" })
   } catch {
     // 网络错误 / CORS / DNS 等：兜底为服务内部错误
     throw new AppError(1003)
   }
 
-  // 仅未捕获的框架级/网关级异常才会出现 4xx/5xx（规范 0.5）；此处统一兜底
+  if (res.status === 401) {
+    clearSession(session?.token ?? null)
+    throw new AppError(1005)
+  }
+  if (res.status === 429) throw new AppError(1006)
+  if (res.status === 403) throw new AppError(1007)
   if (!res.ok) {
     throw new AppError(1003)
   }
@@ -89,6 +99,10 @@ async function requestEnvelope<T>(path: string, init?: RequestInit): Promise<T> 
   if (!envelope || typeof envelope.code !== "number") {
     throw new AppError(1003)
   }
+
+  if (!isPublicAuth && session?.token !== readSession()?.token) throw new AppError(1005)
+
+  if (envelope.code === 1005) clearSession(session?.token ?? null)
 
   if (envelope.code === 0) {
     return envelope.data

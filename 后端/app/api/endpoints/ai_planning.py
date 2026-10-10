@@ -9,7 +9,7 @@ from app.core.business_logging import business_task
 from app.core.dependencies import get_current_user_id
 from app.core.responses import success
 from app.models.dto import PlanningRequest
-from app.services import planning_service
+from app.services import account_service, planning_service
 
 router = APIRouter(tags=["ai-planning"])
 
@@ -30,16 +30,20 @@ def ai_planning(
     ):
         with planning_progress.progress_session(
             payload.progress_token,
+            user_id=current_user_id,
             planning_model=payload.planning_model,
         ):
             result = planning_service.plan(current_user_id, payload)
             planning_progress.finish()
-    return success(result.model_dump())
+    data = result.model_dump()
+    account_service.grant_planning_media(current_user_id, data)
+    return success(data)
 
 
 @router.get("/ai/planning/progress")
 def ai_planning_progress(
     token: str = Query(..., max_length=64),
+    current_user_id: str = Depends(get_current_user_id),
 ) -> dict:
     """Read the live stage of an in-flight planning request.
 
@@ -47,4 +51,4 @@ def ai_planning_progress(
     ``null`` data rather than an error, because the client may poll a moment
     before the request registers or after it has been evicted.
     """
-    return success(planning_progress.snapshot(token))
+    return success(planning_progress.snapshot(token, user_id=current_user_id))

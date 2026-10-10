@@ -7,7 +7,7 @@
  * - 前端展示统一用 CODE_MESSAGE，不直接暴露后端 message 之外的内部细节、堆栈、网关错误。
  */
 
-export type BusinessErrorCode = 1001 | 1002 | 1003 | 1004
+export type BusinessErrorCode = 1001 | 1002 | 1003 | 1004 | 1005 | 1006 | 1007
 
 /** 业务错误码 → 友好文案（对齐规范 0.6 / §12）。 */
 export const CODE_MESSAGE: Record<BusinessErrorCode, string> = {
@@ -15,6 +15,9 @@ export const CODE_MESSAGE: Record<BusinessErrorCode, string> = {
   1002: "请求参数有误，请检查后重试",
   1003: "服务异常，请稍后再试",
   1004: "内容已被删除",
+  1005: "登录已失效，请重新登录",
+  1006: "操作过于频繁，请稍后再试",
+  1007: "演示账号仅供浏览，请注册自己的账号后操作",
 }
 
 /** 统一业务错误：保留后端 code 与 message，供 UI 决定提示与列表行为。 */

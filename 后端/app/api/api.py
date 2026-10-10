@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     ai_planning,
+    auth,
     discovery,
     generate,
     images,
@@ -21,6 +22,7 @@ from app.api.endpoints import (
 )
 
 api_router = APIRouter()
+api_router.include_router(auth.router)
 
 api_router.include_router(postcard_groups.router)
 api_router.include_router(reports.router)

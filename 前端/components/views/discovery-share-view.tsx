@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { ArrowLeft, Camera, Check, FileText, Images, LoaderCircle, Route, Sparkles, X } from "lucide-react"
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
+import { useAuth } from "@/components/shared/auth-context"
 import { DiscoveryDialog, NoteBody, TagPicker } from "@/components/discovery/shared"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 import { uploadImage } from "@/lib/api"
@@ -21,6 +22,7 @@ function emptyDraft(tripId: string): ShareInput {
 function ShareForm({ options }: { options: ShareOptions }) {
   const router = useRouter()
   const { toast, toastError } = useApp()
+  const { user } = useAuth()
   const [draft, setDraft] = useState<ShareInput>(() => ({
     ...emptyDraft(options.trip.id), title: (options.trip.title + " · 旅行随记").slice(0, 60), destination: options.trip.destination,
     photoAssetIds: options.photos.slice(0, 9).map((photo) => photo.id),
@@ -35,7 +37,7 @@ function ShareForm({ options }: { options: ShareOptions }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const requestId = useRef("")
   const draftRef = useRef(draft)
-  const draftKey = "lvyousuotu:discovery-draft:" + options.trip.id
+  const draftKey = `lvyousuotu:discovery-draft:${user?.id}:${options.trip.id}`
   useEffect(() => { draftRef.current = draft }, [draft])
   useEffect(() => {
     let restored: { draft?: ShareInput; photos?: { id: string; url: string }[] } | null = null

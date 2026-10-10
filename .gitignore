@@ -7,8 +7,12 @@
 # 文档类、测试与浏览器
 docs/
 QUALITY_REVIEW.md
-后端/tests/
-前端/tests/
+后端/tests/*
+前端/tests/*
+!/后端/tests/test_authentication.py
+!/后端/tests/test_discovery.py
+!/前端/tests/auth-session.test.mjs
+!/前端/tests/client-runtime.test.mjs
 .playwright-cli/
 playwright-report/
 test-results/
@@ -76,6 +80,7 @@ htmlcov/
 !/后端/static/images/default_cover.jpg
 /后端/logs/
 /后端/tmp/
+/后端/data/auth.db*
 
 # Backend local-only dirs (keep tests and scripts/seed_demo.py tracked)
 /后端/deploy/

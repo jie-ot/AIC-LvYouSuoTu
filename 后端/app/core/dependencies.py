@@ -1,21 +1,22 @@
-"""Global FastAPI dependencies.
+"""Shared server-verified identity for all private business routes."""
 
-Authentication / user isolation master definition: 《后端技术栈与全局规范》四.
-The demo is single-user and login-less; routes must never read the user
-constant from config directly — they must inject `current_user_id` via
-`Depends(get_current_user_id)`. Upgrading to JWT later only changes this
-function; business code stays untouched.
-"""
+from fastapi import Depends, Request
+from app.core.exceptions import ReadOnlyError
 
-from __future__ import annotations
-
-from app.core.config import settings
+from app.services import account_service
 
 
-def get_current_user_id() -> str:
-    """Return the current user id.
+def bearer_token(request: Request) -> str | None:
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    return token if scheme.casefold() == "bearer" else None
 
-    Demo phase returns `settings.DEFAULT_USER_ID`. A future JWT upgrade only
-    replaces the body of this function.
-    """
-    return settings.DEFAULT_USER_ID
+
+def get_current_account(request: Request) -> dict:
+    account = account_service.authenticate(bearer_token(request))
+    if account["readOnly"] and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        raise ReadOnlyError("演示账号仅供浏览，请注册自己的账号后操作")
+    return account
+
+
+def get_current_user_id(account: dict = Depends(get_current_account)) -> str:
+    return account["id"]
