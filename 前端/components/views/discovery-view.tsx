@@ -7,6 +7,7 @@ import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
 import { useAuth } from "@/components/shared/auth-context"
 import { AccountMenu } from "@/components/shared/account-menu"
+import { CollectionScroll } from "@/components/shared/collection-scroll"
 import { DiscoveryGrid } from "@/components/discovery/shared"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 import { DISCOVERY_TAGS, discoveryFeedback, getDiscoveryFeed, recordDiscoverySearch, type Feed, type FeedMode } from "@/lib/discovery-api"
@@ -25,7 +26,8 @@ export function DiscoveryView() {
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const epoch = useRef(0)
-  const scroll = useRef<HTMLDivElement>(null)
+  const scroll = useRef<HTMLElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
   const semanticStatus = feed?.semantic?.status
   const itemCount = feed?.items.length ?? 0
 
@@ -86,12 +88,12 @@ export function DiscoveryView() {
       setRevision((value) => value + 1)
     } catch (error) { toastError(error) } finally { setBusy(null) }
   }
-  return <div className="app-page discovery-page">
-    <header className="discovery-header">
+  const action = <Link href="/discover/share" className="discovery-primary"><Plus size={18} aria-hidden /><span>分享旅行</span></Link>
+  const header = <header className="discovery-header">
       <div className="discovery-heading"><div><div className="collection-brand-row"><div className="brand-mark">旅有所图 / 发现</div><AccountMenu /></div><h1>旅行发现<span>下一程，从这里开始</span></h1></div>
-        <Link href="/discover/share" className="discovery-primary"><Plus size={18} /><span>分享旅行</span></Link></div>
+        {action}</div>
       <div className="discovery-search-row"><form className="discovery-search" role="search" onSubmit={(event) => { event.preventDefault(); submitSearch() }}>
-        <Search size={19} /><input aria-label="搜索旅行笔记" value={search} onChange={(event) => setSearch(event.target.value)} maxLength={100} placeholder="搜目的地、旅行方式、推荐与避雷" />
+        <Search size={19} /><input ref={searchInput} aria-label="搜索旅行笔记" value={search} onChange={(event) => setSearch(event.target.value)} maxLength={100} placeholder="搜目的地、旅行方式、推荐与避雷" />
         {search ? <button type="button" onClick={() => { setSearch(""); setQuery("") }} aria-label="清空搜索">清空</button> : null}
         <button type="submit">搜索</button></form></div>
       <div className="discovery-tabs" role="group" aria-label="笔记范围">{([
@@ -99,7 +101,13 @@ export function DiscoveryView() {
       ] as [FeedMode, string][]).map(([key, label]) => <button type="button" key={key} aria-pressed={mode === key} onClick={() => setMode(key)}>{label}</button>)}</div>
       <div className="discovery-topics" role="group" aria-label="旅行主题">{["", ...DISCOVERY_TAGS].map((tag) => <button type="button" key={tag} aria-pressed={topic === tag} onClick={() => setTopic(tag)}>{tag || "全部"}</button>)}</div>
     </header>
-    <main ref={scroll} className="discovery-scroll">
+  return <div className="app-page discovery-page">
+    <CollectionScroll section="发现" title="旅行发现" action={action} header={header}
+      contentClassName="discovery-scroll" scrollRef={scroll}
+      toolbarTools={<button type="button" className="collection-search-trigger" onClick={() => {
+        scroll.current?.scrollTo({ top: 0 })
+        searchInput.current?.focus({ preventScroll: true })
+      }}><Search size={16} aria-hidden />搜索筛选</button>}>
       {feed && !query && mode === "recommended" ? <div className="discovery-intent"><Compass size={16} aria-hidden /><p>发现下一程的灵感</p>
         <span>{feed.demoCount ? feed.demoCount + " 篇演示笔记" : "按你的旅行需求推荐"}</span></div> : null}
       {query ? <p className="discovery-result-label">“{query}”的搜索结果{!loading && feed ? " · " + feed.total + " 篇" : ""}</p> : null}
@@ -122,7 +130,7 @@ export function DiscoveryView() {
           </article>)}
         </DiscoveryGrid>{feed.nextOffset !== null ? <button type="button" className="discovery-load-more" disabled={more} onClick={() => void loadMore()}>{more ? "加载中…" : "再看看更多旅行"}</button> : <p className="discovery-end">这次就看到这里，下一程等你分享。</p>}</> :
         <section className="discovery-empty"><Compass size={32} /><h2>{query ? "还没有找到相关笔记" : mode === "saved" ? "把喜欢的旅行先收藏起来" : mode === "mine" ? "分享你的第一篇旅行笔记" : mode === "hidden" ? "还没有隐藏的笔记" : "暂时没有合适的笔记"}</h2><p>{query ? "换一个目的地或关键词试试。" : mode === "mine" ? "照片、明信片、人格报告和行程，都可以一起分享。" : "可以换个主题，看看其他旅行。"}</p>{mode === "mine" ? <Link href="/discover/share" className="discovery-primary">分享旅行</Link> : <button type="button" className="discovery-secondary" onClick={() => { setTopic(""); setQuery(""); setSearch(""); setMode("recommended") }}>随处看看</button>}</section>}
-    </main>
+    </CollectionScroll>
     <BottomNav />
   </div>
 }

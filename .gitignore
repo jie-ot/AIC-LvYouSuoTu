@@ -10,6 +10,7 @@ QUALITY_REVIEW.md
 后端/tests/*
 前端/tests/*
 !/后端/tests/test_authentication.py
+!/后端/tests/test_usage_limits.py
 !/后端/tests/test_discovery.py
 !/前端/tests/auth-session.test.mjs
 !/前端/tests/client-runtime.test.mjs
@@ -74,15 +75,13 @@ htmlcov/
 *.db-wal
 *.sqlite
 *.sqlite3
-/后端/static/uploads/
-/后端/static/generated/
-/后端/static/images/*
-!/后端/static/images/default_cover.jpg
+/后端/data/
+/后端/static/
 /后端/logs/
 /后端/tmp/
-/后端/data/auth.db*
 
 # Backend local-only dirs (keep tests and scripts/seed_demo.py tracked)
+/deployment/
 /后端/deploy/
 /后端/e2e_result/
 /后端/e2e_results/
@@ -117,12 +116,3 @@ Desktop.ini
 *.tmp
 *.temp
 ~$*
-
-# 录屏演示数据
-!/后端/data/lvyousuotu.db
-!/后端/static/uploads/
-!/后端/static/uploads/**
-!/后端/static/generated/
-!/后端/static/generated/**
-!/后端/static/images/
-!/后端/static/images/**

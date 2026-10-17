@@ -55,6 +55,7 @@ from app.services import (
     profile_engine,
     storage_service,
     trip_service,
+    usage_service,
 )
 from app.services.storage_service import ALLOWED_MIME_TYPES, MAX_UPLOAD_BYTES, PREFIX_UPLOADS
 
@@ -387,6 +388,22 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
             _finalize_operation(operation_id, replay)
         return replay
 
+    try:
+        with usage_service.reserve(user_id, "creation") as usage:
+            result = _generate_new(user_id, request, operation_id)
+            usage.consume()
+            return result
+    except Exception as exc:
+        _mark_operation_failed(
+            operation_id, exc.message if isinstance(exc, BusinessError) else type(exc).__name__,
+        )
+        raise
+
+
+def _generate_new(
+    user_id: str, request: dto.GenerateRequest, operation_id: str,
+) -> dto.GenerateResult:
+    options = request.options
     with session_scope() as session:
         operation = session.get(GenerationOperation, operation_id)
         effective_trip_id = request.trip_id or (operation.trip_id if operation else None)
@@ -598,13 +615,11 @@ def generate(user_id: str, request: dto.GenerateRequest) -> dto.GenerateResult:
                 result.status = "partial"
         _finalize_operation(operation_id, result)
         return result
-    except BusinessError as exc:
+    except BusinessError:
         _discard(generated_temp_asset_ids)
-        _mark_operation_failed(operation_id, exc.message)
         raise
     except Exception as exc:  # noqa: BLE001
         _discard(generated_temp_asset_ids)
-        _mark_operation_failed(operation_id, type(exc).__name__)
         raise InternalError("生成过程发生内部错误") from exc
 
 

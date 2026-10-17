@@ -1,0 +1,23 @@
+/* Browsing pages share one scroll area for the heading and its content. */
+.collection-pane { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.collection-scroll { width: 100%; height: 100%; overflow-y: auto; overscroll-behavior-y: contain; scroll-padding-top: 64px; scrollbar-width: thin; }
+.collection-scroll > .collection-main,
+.collection-scroll > .archive-scroll,
+.collection-scroll > .memory-main,
+.collection-scroll > .discovery-scroll { flex: none; height: auto; overflow: visible; }
+.collection-toolbar { position: absolute; inset: 0 0 auto; z-index: 25; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px 18px; border-bottom: 1px solid var(--hairline); background: var(--paper); }
+.collection-toolbar-title { flex: 1; min-width: 0; min-height: 40px; overflow: hidden; border: 0; padding: 6px 0; background: none; color: var(--ink); font-size: 17px; font-weight: 650; line-height: 1.4; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.collection-toolbar-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
+.collection-toolbar .primary-quiet-button,
+.collection-toolbar .discovery-primary { min-height: 36px; border-radius: 10px; padding: 7px 12px; font-size: 12px; }
+.collection-search-trigger { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--hairline); border-radius: 10px; padding: 7px 10px; background: #fff; color: var(--sage); font-size: 12px; white-space: nowrap; }
+.collection-search-trigger:hover { background: var(--sage-soft); }
+
+@media (min-width: 700px) {
+  .collection-toolbar { padding-inline: 30px; }
+}
+@media (max-width: 699px) {
+  .collection-toolbar { gap: 8px; padding-inline: 12px; }
+  .collection-toolbar-title { font-size: 16px; }
+  .collection-toolbar .account-menu { display: none; }
+}

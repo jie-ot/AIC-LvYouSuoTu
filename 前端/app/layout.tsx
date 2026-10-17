@@ -11,6 +11,7 @@ import './discovery.css'
 import './interaction.css'
 import './journey.css'
 import './auth.css'
+import './collection-scroll.css'
 
 export const metadata: Metadata = {
   title: '旅有所图',

@@ -4,7 +4,7 @@
 
 开始前，先按[项目首页](../README.md)安装 **Node.js 24.x LTS 和 pnpm 10.33.3**，再按[后端教程](../后端/README.md)启动后端。浏览器能打开 http://localhost:8000/docs 后，保留后端窗口，新开一个终端窗口准备运行前端。
 
-所有前端命令都要在 **`前端` 文件夹**执行。第一次需要安装依赖、配置连接地址并构建；日常使用只需要启动服务。
+所有前端命令都要在 **`前端` 文件夹**执行。第一次需要安装依赖、配置连接地址，再用 `pnpm dev` 启动；日常使用直接启动即可，无需先构建。
 
 ## 1. 安装依赖并打开配置文件
 
@@ -14,7 +14,7 @@
 
 ```powershell
 cd 前端
-pnpm.cmd install --frozen-lockfile
+pnpm install --frozen-lockfile
 if (-not (Test-Path -LiteralPath ".env.local")) { Copy-Item -LiteralPath ".env.local.example" -Destination ".env.local" }
 notepad .env.local
 ```
@@ -43,25 +43,17 @@ NEXT_PUBLIC_ASSET_BASE_URL=http://localhost:8000
 
 按 `Ctrl + S`（Windows）或 `Command + S`（Mac）保存并关闭编辑器。文件名必须为 `.env.local`，不要另存为 `.env.local.txt`。后端 `.env` 中的 `FRONTEND_ORIGINS` 应为 `http://localhost:3000`。
 
-这些地址会在构建时写入网页，所以先完成配置，再执行下一步。之后修改 `.env.local`，也需要重新构建前端。
+先完成连接地址配置，再执行下一步。之后修改 `.env.local`，需要停止并重新执行 `pnpm dev`，使新配置生效。
 
-## 3. 构建并启动网页
+## 3. 启动网页
 
-仍在 `前端` 文件夹，Windows PowerShell 逐行执行：
-
-```powershell
-pnpm.cmd build
-pnpm.cmd start
-```
-
-Mac 终端逐行执行：
+仍在 `前端` 文件夹，Windows 和 Mac 都执行：
 
 ```bash
-pnpm build
-pnpm start
+pnpm dev
 ```
 
-构建可能需要几分钟。只有 `build` 成功完成并返回命令输入位置后，才执行 `start`。本项目把网页构建到 `out/` 文件夹，启动命令会提供这些网页；请使用完整的 `build` 命令，让项目自带的静态文件处理也一并执行。
+`pnpm dev` 会启动开发服务并编译页面，首次启动和打开页面可能需要等待一会儿。修改前端代码后，网页通常会自动刷新。
 
 启动后会显示类似下面的本地地址：
 
@@ -79,43 +71,29 @@ Local: http://localhost:3000
 
 以后切到“登录”，使用注册时的用户名和密码进入。页面顶部账号菜单会显示当前用户名和只读状态，可选择“退出登录 / 切换账号”。退出不会删除已保存的资料，未保存的行程草稿会清除。
 
-维护原演示资料时，用 `demo` 和维护密码在普通“登录”中进入。维护密码是在后端首次初始化时设置的，详见[后端账号说明](../后端/README.md)。各个人账号资料独立，主动发布到“发现”的笔记可以共享浏览。
+“体验演示账号”无需密码。需要上传、生成或编辑资料时，请使用自己的账号。各个人账号资料独立，主动发布到“发现”的笔记可以共享浏览。
 
 注册、登录和浏览已有演示资料不需要 AI Key。照片分析、报告、明信片和规划等 AI 功能需要[后端配置对应的 Key](../后端/README.md)；注册用户共用后端服务配置。生成时按页面提示等待，完成后再查看或保存结果。
 
 ## 5. 日常启动和修改后的操作
 
-下次使用时，先启动后端，再在 `前端` 文件夹执行 `pnpm.cmd start`（Windows）或 `pnpm start`（Mac），然后打开 http://localhost:3000。已经构建过且代码和配置没有变化时，无需重新安装或构建。
+下次使用时，先启动后端，再在 `前端` 文件夹执行 `pnpm dev`，然后打开 http://localhost:3000。已经安装过依赖且依赖文件没有变化时，无需重新安装。
 
-停止前端时，在运行前端的窗口按 `Ctrl + C`。修改前端代码或 `.env.local` 后，先停止前端，再执行：
+停止前端时，在运行前端的窗口按 `Ctrl + C`。修改前端代码后通常会自动刷新页面；修改 `.env.local` 后，先停止前端，再执行 `pnpm dev`。
 
-Windows PowerShell：
-
-```powershell
-pnpm.cmd build
-pnpm.cmd start
-```
-
-Mac 终端：
-
-```bash
-pnpm build
-pnpm start
-```
-
-更新项目代码后，先重新执行 `pnpm.cmd install --frozen-lockfile`（Windows）或 `pnpm install --frozen-lockfile`（Mac），再构建、启动。修改后端 `.env` 只需要重启后端；修改前端 `.env.local` 则需要重新构建前端。
+更新项目代码后，先停止前端，执行 `pnpm install --frozen-lockfile`，再用 `pnpm dev` 启动。修改后端 `.env` 只需要重启后端。
 
 ## 常见问题
 
 | 现象 | 处理方法 |
 | --- | --- |
 | 找不到 `pnpm` 或 `pnpm.cmd` | 按[项目首页](../README.md)安装 pnpm 10.33.3，重新打开终端后检查版本 |
-| Windows 提示 `pnpm.ps1` 无法加载或禁止运行脚本 | 使用教程中的 `pnpm.cmd`，例如 `pnpm.cmd start` |
+| Windows 提示 `pnpm.ps1` 无法加载或禁止运行脚本 | 将对应命令中的 `pnpm` 改为 `pnpm.cmd`，例如 `pnpm.cmd dev` |
 | 找不到 `package.json` | 当前目录应是 `前端`；Windows 用 `Get-Location`、Mac 用 `pwd` 查看位置 |
 | 下载依赖失败 | 检查网络后重新执行对应系统的 `install --frozen-lockfile` 命令 |
-| 构建提示 Node.js 版本不支持 | 用 `node --version` 检查，按项目首页安装 Node.js 24.x LTS，然后重新打开终端 |
-| 提示没有 `out/` 文件夹，或网页打不开 | 先执行并成功完成 `build`，再执行 `start`；确认前端终端仍在运行 |
+| 启动提示 Node.js 版本不支持 | 用 `node --version` 检查，按项目首页安装 Node.js 24.x LTS，然后重新打开终端 |
+| 网页打不开 | 确认 `pnpm dev` 已成功启动、前后端终端仍在运行，并访问前端终端显示的本地地址 |
 | 启动显示其他端口，或提示 `3000` 被占用 | 先检查 http://localhost:3000 是否已有前端运行；需要重启时，在原窗口按 `Ctrl + C` 后再启动，保持教程中的 `3000` 端口 |
-| 页面能打开，但登录失败、加载不了资料或图片 | 先检查 http://localhost:8000/docs 能否打开；确认 `.env.local` 的两行本机地址正确，修改后重新构建，并检查后端允许的前端地址 |
+| 页面能打开，但登录失败、加载不了资料或图片 | 先检查 http://localhost:8000/docs 能否打开；确认 `.env.local` 的两行本机地址正确，修改后重启 `pnpm dev`，并检查后端允许的前端地址 |
 | 注册成功，但没有原来的旅行资料 | 新账号从空白旅行资料开始；查看现有演示资料时切换到“体验演示账号” |
-| 演示账号无法生成或保存 | 只读演示的正常权限，需要使用自己的账号，或用维护密码登录 `demo` |
+| 演示账号无法生成或保存 | 只读演示的正常权限，需要注册并登录自己的账号 |

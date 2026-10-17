@@ -21,6 +21,7 @@ CODE_NOT_FOUND = 1004  # 资源不存在
 CODE_AUTH_REQUIRED = 1005  # 登录缺失、失效或已退出
 CODE_RATE_LIMITED = 1006  # 登录/注册尝试过于频繁
 CODE_READ_ONLY = 1007  # 共享演示体验仅允许读取
+CODE_USAGE_LIMIT = 1008  # 普通账号累计使用额度已用完
 
 MESSAGE_SUCCESS = "success"
 

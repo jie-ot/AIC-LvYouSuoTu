@@ -6,7 +6,7 @@ import { ArrowRight, CalendarDays, Camera, FileText, Map, Plus, Route, X } from 
 import { BottomNav } from "@/components/shared/bottom-nav"
 import { useApp } from "@/components/shared/app-context"
 import { Modal } from "@/components/shared/modal"
-import { CollectionHeader } from "@/components/shared/collection-header"
+import { CollectionScroll } from "@/components/shared/collection-scroll"
 import { EmptyState } from "@/components/shared/empty-state"
 import { handleImageError, resolveAssetUrl } from "@/lib/asset"
 
@@ -16,17 +16,16 @@ export function HomeView() {
 
   return (
     <div className="app-page trips-page">
-      <CollectionHeader
+      <CollectionScroll
         section="旅行"
         title="我的旅行"
         description="把走过的路，收进自己的旅行集。"
         count={trips.length ? `${trips.length} 次旅行` : undefined}
+        contentClassName="collection-main"
         action={<button type="button" className="primary-quiet-button" onClick={() => setCreating(true)}>
           <Plus size={17} aria-hidden />新建旅行
         </button>}
-      />
-
-      <main className="collection-main">
+      >
         {loadError.trips ? (
           <section className="plain-state">
             <p>旅行加载失败</p>
@@ -68,7 +67,7 @@ export function HomeView() {
             <Link href="/planning" className="secondary-action"><Route size={17} aria-hidden />规划新旅行</Link>
           </EmptyState>
         )}
-      </main>
+      </CollectionScroll>
 
       <Modal open={creating} onClose={() => setCreating(false)} className="action-modal" label="新建旅行">
           <section className="action-sheet">

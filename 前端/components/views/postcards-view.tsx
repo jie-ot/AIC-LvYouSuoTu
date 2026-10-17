@@ -7,7 +7,7 @@ import { BottomNav } from "@/components/shared/bottom-nav";
 import { ActionMenu } from "@/components/shared/action-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { EmptyState } from "@/components/shared/empty-state";
-import { CollectionHeader } from "@/components/shared/collection-header";
+import { CollectionScroll } from "@/components/shared/collection-scroll";
 import {
   PLACEHOLDER_IMAGE,
   handleImageError,
@@ -23,14 +23,14 @@ export function PostcardsView() {
     displayPlace(group.location, trips.find((trip) => trip.id === group.tripId)?.title);
   return (
     <div className="app-page archive-page">
-      <CollectionHeader
+      <CollectionScroll
         section="明信片"
         title="旅行明信片"
         description="把喜欢的风景，寄给未来的自己。"
         count={postcardGroups.length ? `${postcardGroups.reduce((n, g) => n + g.postcards.length, 0)} 张明信片` : undefined}
+        contentClassName="archive-scroll"
         action={<Link href="/create?mode=postcard" className="primary-quiet-button"><Plus size={17} aria-hidden />制作明信片</Link>}
-      />
-      <main className="archive-scroll">
+      >
         {postcardGroups.length ? (
           <div className="postcard-archive">
             {postcardGroups.map((group) => (
@@ -84,7 +84,7 @@ export function PostcardsView() {
             </Link>
           </EmptyState>
         )}
-      </main>
+      </CollectionScroll>
       <ConfirmDialog
         open={!!pending}
         title="删除这组明信片？"

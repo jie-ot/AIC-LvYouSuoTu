@@ -9,7 +9,7 @@ from app.core.business_logging import business_task
 from app.core.dependencies import get_current_user_id
 from app.core.responses import success
 from app.models.dto import PlanningRequest
-from app.services import account_service, planning_service
+from app.services import account_service, planning_service, usage_service
 
 router = APIRouter(tags=["ai-planning"])
 
@@ -19,7 +19,7 @@ def ai_planning(
     payload: PlanningRequest,
     current_user_id: str = Depends(get_current_user_id),
 ) -> dict:
-    with business_task(
+    with usage_service.reserve(current_user_id, "planning") as usage, business_task(
         "ai_planning",
         user_id=current_user_id,
         has_context=payload.context is not None,
@@ -35,8 +35,10 @@ def ai_planning(
         ):
             result = planning_service.plan(current_user_id, payload)
             planning_progress.finish()
-    data = result.model_dump()
-    account_service.grant_planning_media(current_user_id, data)
+        data = result.model_dump()
+        account_service.grant_planning_media(current_user_id, data)
+        if result.phase == "completed" and result.itinerary is not None:
+            usage.consume()
     return success(data)
 
 

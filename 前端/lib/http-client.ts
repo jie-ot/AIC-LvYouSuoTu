@@ -19,7 +19,7 @@ interface ApiEnvelope<T> {
   data: T
 }
 
-const KNOWN_CODES: BusinessErrorCode[] = [1001, 1002, 1003, 1004, 1005, 1006, 1007]
+const KNOWN_CODES: BusinessErrorCode[] = [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008]
 const READ_TIMEOUT_MS = 20_000
 
 function normalizeCode(code: number): BusinessErrorCode {

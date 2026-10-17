@@ -15,6 +15,7 @@ from app.core.responses import (
     CODE_NOT_FOUND,
     CODE_RATE_LIMITED,
     CODE_READ_ONLY,
+    CODE_USAGE_LIMIT,
 )
 
 
@@ -82,3 +83,7 @@ class RateLimitError(BusinessError):
 class ReadOnlyError(BusinessError):
     code = CODE_READ_ONLY
     status_code = 403
+
+
+class UsageLimitError(BusinessError):
+    code = CODE_USAGE_LIMIT

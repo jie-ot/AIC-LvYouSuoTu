@@ -1,19 +1,21 @@
 import type { ReactNode } from "react"
 import { AccountMenu } from "./account-menu"
 
+export interface CollectionHeaderProps {
+  section: string
+  title: string
+  description?: string
+  action?: ReactNode
+  count?: string
+}
+
 export function CollectionHeader({
   section,
   title,
   description,
   action,
   count,
-}: {
-  section: string
-  title: string
-  description?: string
-  action?: ReactNode
-  count?: string
-}) {
+}: CollectionHeaderProps) {
   return (
     <header className="collection-header">
       <div className="collection-heading">

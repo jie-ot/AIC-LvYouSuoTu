@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.models.base import utcnow
@@ -41,3 +41,19 @@ class PlanningMediaAccess(AccountBase):
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     relative_path: Mapped[str] = mapped_column(String, primary_key=True)
+
+
+class FeatureUsage(AccountBase):
+    """A lifetime credit, reserved before model work and retained on success."""
+
+    __tablename__ = "feature_usage"
+    __table_args__ = (
+        UniqueConstraint("user_id", "feature", "slot", name="uq_feature_usage_slot"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), index=True)
+    feature: Mapped[str] = mapped_column(String, nullable=False)
+    slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
